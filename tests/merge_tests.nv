@@ -1,0 +1,251 @@
+// merge_tests.nv — the API suite for the value tree, the layers and
+// the five merge rules.
+//
+// RED ON PURPOSE: every body is a `todo()`.  Run with `--isolate` for
+// one verdict per `@test`.
+//
+// WHAT THESE CASES ARE FOR.  Not to check that a merge works — nothing
+// merges yet — but to write the five rules down a second time, as
+// executable claims, in a place the implementation lane cannot edit
+// without noticing.  Every case below is a sentence from the README's
+// "load-bearing interface" section with the prose taken off.
+
+use std.test
+use std.list
+use cfgvalue
+use cfglayer
+use cfgmerge
+
+@test
+fn test_the_tree_tells_its_arms_apart() [io]
+    test.case("every constructor round-trips through kind_of")
+    test.assert(cfgvalue.kind_name(cfgvalue.kind_of(cfgvalue.str_value("x"))) == "str")
+    test.assert(cfgvalue.kind_name(cfgvalue.kind_of(cfgvalue.int_value(1))) == "int")
+    test.assert(cfgvalue.kind_name(cfgvalue.kind_of(cfgvalue.float_value(1.0))) == "float")
+    test.assert(cfgvalue.kind_name(cfgvalue.kind_of(cfgvalue.bool_value(true))) == "bool")
+    test.assert(cfgvalue.kind_name(cfgvalue.kind_of(cfgvalue.null_value())) == "null")
+    test.assert(cfgvalue.kind_name(cfgvalue.kind_of(cfgvalue.empty_table())) == "table")
+    test.assert(cfgvalue.kind_name(cfgvalue.kind_of(cfgvalue.list_of([]))) == "list")
+
+    test.case("a scalar has no length and does not need an unwrap to say so")
+    test.assert(cfgvalue.len_of(cfgvalue.int_value(7)) == 0)
+    test.assert(cfgvalue.len_of(cfgvalue.null_value()) == 0)
+
+    test.case("null is a value, not an absence")
+    test.assert(cfgvalue.is_null(cfgvalue.null_value()))
+    test.assert(cfgvalue.is_null(cfgvalue.str_value("")) == false)
+
+    test.case("a table's keys come back in the order it was written")
+    let t = cfgvalue.table([
+        cfgvalue.pair("b", cfgvalue.int_value(1)),
+        cfgvalue.pair("a", cfgvalue.int_value(2))])
+    let ks = cfgvalue.keys_of(t)
+    test.assert(list.len(ks) == 2)
+    test.assert(ks[0] == "b")
+
+    test.case("and anything that is not a table has none")
+    test.assert(list.len(cfgvalue.keys_of(cfgvalue.int_value(1))) == 0)
+
+@test
+fn test_infer_scalar_is_the_only_coercion() [io]
+    test.case("the four spellings it recognises")
+    test.assert(cfgvalue.kind_name(cfgvalue.kind_of(cfgvalue.infer_scalar("true"))) == "bool")
+    test.assert(cfgvalue.kind_name(cfgvalue.kind_of(cfgvalue.infer_scalar("8080"))) == "int")
+    test.assert(cfgvalue.kind_name(cfgvalue.kind_of(cfgvalue.infer_scalar("1.5"))) == "float")
+    test.assert(cfgvalue.kind_name(cfgvalue.kind_of(cfgvalue.infer_scalar("null"))) == "null")
+
+    test.case("and everything else stays text, the empty string included")
+    test.assert(cfgvalue.kind_name(cfgvalue.kind_of(cfgvalue.infer_scalar("8080a"))) == "str")
+    test.assert(cfgvalue.kind_name(cfgvalue.kind_of(cfgvalue.infer_scalar(""))) == "str")
+    test.assert(cfgvalue.kind_name(cfgvalue.kind_of(cfgvalue.infer_scalar("True"))) == "str")
+
+    test.case("scalar_text is its inverse for the scalars and refuses the rest")
+    match cfgvalue.scalar_text(cfgvalue.bool_value(false))
+        Some(t) => test.assert(t == "false")
+        None    => test.fail("a bool has a spelling")
+    match cfgvalue.scalar_text(cfgvalue.empty_table())
+        Some(_) => test.fail("no format agrees on how a table is spelled")
+        None    => test.assert(true)
+
+@test
+fn test_rank_decides_the_order_and_the_list_breaks_the_tie() [io]
+    let a = cfglayer.layer("defaults", 0, cfgvalue.empty_table())
+    let b = cfglayer.layer("/etc/app.toml", 10, cfgvalue.empty_table())
+    let c = cfglayer.layer("APP_ environment", 10, cfgvalue.empty_table())
+
+    test.case("in_order sorts ascending")
+    let ordered = cfglayer.in_order([c, b, a])
+    test.assert(list.len(ordered) == 3)
+    test.assert(ordered[0].name == "defaults")
+
+    test.case("and equal ranks keep the order they were handed in")
+    test.assert(ordered[1].name == "/etc/app.toml")
+    test.assert(ordered[2].name == "APP_ environment")
+
+    test.case("top_rank is what a host adds one to")
+    test.assert(cfglayer.top_rank([a, b, c]) == 10)
+    test.assert(cfglayer.top_rank([]) == 0)
+
+    test.case("named finds the first of a name")
+    match cfglayer.named([a, b], "defaults")
+        Some(l) => test.assert(l.rank == 0)
+        None    => test.fail("that layer is in the list")
+
+    test.case("renamed carries the path a host learned after it read the file")
+    test.assert(cfglayer.renamed(b, "/etc/app.toml.d/10-base.toml").name
+                == "/etc/app.toml.d/10-base.toml")
+    test.assert(cfglayer.renamed(b, "x").rank == 10)
+
+@test
+fn test_rule_one_a_later_layer_wins() [io]
+    let lo = cfglayer.layer("defaults", 0,
+        cfgvalue.table([cfgvalue.pair("port", cfgvalue.int_value(80))]))
+    let hi = cfglayer.layer("APP_ environment", 30,
+        cfgvalue.table([cfgvalue.pair("port", cfgvalue.int_value(8080))]))
+
+    test.case("the higher rank supplies the value")
+    let m = cfgmerge.merge_all([lo, hi])
+    match cfgvalue.field(cfgmerge.root_of(m), "port")
+        Some(v) => test.assert(cfgvalue.kind_name(cfgvalue.kind_of(v)) == "int")
+        None    => test.fail("both layers set it")
+
+    test.case("and the order the layers were listed in does not matter")
+    let m2 = cfgmerge.merge_all([hi, lo])
+    match cfgmerge.origin_of(m2, "port")
+        Some(o) => test.assert(o.layer == "APP_ environment")
+        None    => test.fail("both layers set it")
+
+@test
+fn test_rule_two_tables_merge_deep() [io]
+    let lo = cfglayer.layer("defaults", 0, cfgvalue.table([
+        cfgvalue.pair("server", cfgvalue.table([
+            cfgvalue.pair("host", cfgvalue.str_value("localhost")),
+            cfgvalue.pair("port", cfgvalue.int_value(80))]))]))
+    let hi = cfglayer.layer("/etc/app.toml", 10, cfgvalue.table([
+        cfgvalue.pair("server", cfgvalue.table([
+            cfgvalue.pair("port", cfgvalue.int_value(8080))]))]))
+
+    test.case("a key only the lower layer has survives")
+    let m = cfgmerge.merge_all([lo, hi])
+    match cfgmerge.origin_of(m, "server.host")
+        Some(o) => test.assert(o.layer == "defaults")
+        None    => test.fail("the lower layer set the host")
+
+    test.case("and the key both set comes from the higher one")
+    match cfgmerge.origin_of(m, "server.port")
+        Some(o) => test.assert(o.layer == "/etc/app.toml")
+        None    => test.fail("both layers set the port")
+
+@test
+fn test_rule_three_lists_replace_and_do_not_append() [io]
+    let lo = cfglayer.layer("defaults", 0, cfgvalue.table([
+        cfgvalue.pair("flags", cfgvalue.list_of([cfgvalue.str_value("-O2")]))]))
+    let hi = cfglayer.layer("--set", 40, cfgvalue.table([
+        cfgvalue.pair("flags", cfgvalue.list_of([cfgvalue.str_value("-g")]))]))
+
+    test.case("the merged list is the upper one, whole")
+    let m = cfgmerge.merge_all([lo, hi])
+    match cfgvalue.field(cfgmerge.root_of(m), "flags")
+        Some(v) => test.assert(cfgvalue.len_of(v) == 1)
+        None    => test.fail("both layers set flags")
+
+    test.case("which is what lets an upper layer remove an inherited entry")
+    let empty = cfglayer.layer("--set", 40, cfgvalue.table([
+        cfgvalue.pair("flags", cfgvalue.list_of([]))]))
+    match cfgvalue.field(cfgmerge.root_of(cfgmerge.merge_all([lo, empty])), "flags")
+        Some(v) => test.assert(cfgvalue.len_of(v) == 0)
+        None    => test.fail("the upper layer set flags to the empty list")
+
+@test
+fn test_rule_four_anything_else_replaces() [io]
+    let scalar = cfglayer.layer("defaults", 0, cfgvalue.table([
+        cfgvalue.pair("log", cfgvalue.str_value("info"))]))
+    let tbl = cfglayer.layer("/etc/app.toml", 10, cfgvalue.table([
+        cfgvalue.pair("log", cfgvalue.table([
+            cfgvalue.pair("level", cfgvalue.str_value("debug"))]))]))
+
+    test.case("a table over a scalar")
+    let up = cfgmerge.merge_all([scalar, tbl])
+    match cfgvalue.field(cfgmerge.root_of(up), "log")
+        Some(v) => test.assert(cfgvalue.is_table(v))
+        None    => test.fail("both layers set log")
+
+    test.case("and a scalar over a table, which is the same rule read backwards")
+    let down = cfgmerge.merge_all([cfglayer.reranked(tbl, 0), cfglayer.reranked(scalar, 10)])
+    match cfgvalue.field(cfgmerge.root_of(down), "log")
+        Some(v) => test.assert(cfgvalue.is_table(v) == false)
+        None    => test.fail("both layers set log")
+
+@test
+fn test_rule_five_null_replaces_and_does_not_delete() [io]
+    let lo = cfglayer.layer("defaults", 0, cfgvalue.table([
+        cfgvalue.pair("proxy", cfgvalue.str_value("http://corp:8080"))]))
+    let hi = cfglayer.layer("APP_ environment", 30, cfgvalue.table([
+        cfgvalue.pair("proxy", cfgvalue.null_value())]))
+    let m = cfgmerge.merge_all([lo, hi])
+
+    test.case("the key is still there")
+    match cfgvalue.field(cfgmerge.root_of(m), "proxy")
+        Some(v) => test.assert(cfgvalue.is_null(v))
+        None    => test.fail("null replaces a value; it does not remove the key")
+
+    test.case("and provenance points at the layer that cleared it")
+    match cfgmerge.origin_of(m, "proxy")
+        Some(o) => test.assert(o.layer == "APP_ environment")
+        None    => test.fail("a layer set it, to null")
+
+@test
+fn test_merging_nothing_is_the_empty_table() [io]
+    test.case("merge_all of no layers")
+    let m = cfgmerge.merge_all([])
+    test.assert(cfgvalue.is_table(cfgmerge.root_of(m)))
+    test.assert(cfgvalue.len_of(cfgmerge.root_of(m)) == 0)
+    test.assert(list.len(cfgmerge.origins_of(m)) == 0)
+
+    test.case("and empty() is the same value by another name")
+    test.assert(cfgvalue.len_of(cfgmerge.root_of(cfgmerge.empty())) == 0)
+
+@test
+fn test_a_layer_whose_root_is_not_a_table_is_refused_not_fatal() [io]
+    let good = cfglayer.layer("defaults", 0,
+        cfgvalue.table([cfgvalue.pair("a", cfgvalue.int_value(1))]))
+    let bad = cfglayer.layer("a bad adapter", 10, cfgvalue.str_value("oops"))
+
+    test.case("the good layer still contributes")
+    match cfgmerge.origin_of(cfgmerge.merge_all([good, bad]), "a")
+        Some(o) => test.assert(o.layer == "defaults")
+        None    => test.fail("one bad layer should not cost the others")
+
+    test.case("and the bad one is named rather than swallowed")
+    test.assert(list.len(cfgmerge.refused_layers([good, bad])) == 1)
+
+@test
+fn test_history_answers_who_else_set_it() [io]
+    let a = cfglayer.layer("defaults", 0,
+        cfgvalue.table([cfgvalue.pair("port", cfgvalue.int_value(80))]))
+    let b = cfglayer.layer("/etc/app.toml", 10,
+        cfgvalue.table([cfgvalue.pair("port", cfgvalue.int_value(8080))]))
+    let c = cfglayer.layer("--set", 40,
+        cfgvalue.table([cfgvalue.pair("other", cfgvalue.int_value(1))]))
+
+    test.case("every layer that set the path, lowest first")
+    let h = cfgmerge.history_of([a, b, c], "port")
+    test.assert(list.len(h) == 2)
+    test.assert(h[0].layer == "defaults")
+
+    test.case("the winner is last")
+    test.assert(h[1].layer == "/etc/app.toml")
+
+    test.case("and a path nobody set has no history")
+    test.assert(list.len(cfgmerge.history_of([a, b, c], "nothing.here")) == 0)
+
+@test
+fn test_merge_values_is_the_algebra_without_the_bookkeeping() [io]
+    test.case("two tables, no layers in sight")
+    let under = cfgvalue.table([cfgvalue.pair("a", cfgvalue.int_value(1))])
+    let over = cfgvalue.table([cfgvalue.pair("b", cfgvalue.int_value(2))])
+    test.assert(cfgvalue.len_of(cfgmerge.merge_values(under, over)) == 2)
+
+    test.case("and the empty table is its identity on both sides")
+    test.assert(cfgvalue.len_of(cfgmerge.merge_values(cfgvalue.empty_table(), under)) == 1)
+    test.assert(cfgvalue.len_of(cfgmerge.merge_values(under, cfgvalue.empty_table())) == 1)

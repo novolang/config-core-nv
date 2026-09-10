@@ -1,0 +1,347 @@
+// cfgvalue.nv — the one tree every layer is expressed in, and the
+// rule for turning a string into a typed value.
+//
+// WHY THERE IS A TREE OF ITS OWN RATHER THAN toml-nv's OR yaml-nv's.
+// A merge has to compare two values that came from different formats:
+// the file said `port = 8080` in TOML and the environment said
+// `APP_PORT=8080` as text, and "later layer wins" has no answer unless
+// both are the same kind of thing first.  One tree makes the merge
+// total; three trees and a pairwise comparison make it a matrix.
+//
+// The adapters that turn a `TomlValue`, a yaml-nv document or a
+// `std.json` value into this tree live in `config-nv`, not here.  That
+// package depends on the two parsers anyway; this one would acquire
+// them — and calendar-nv behind toml-nv — to carry three functions
+// nothing in the merge calls.  The README argues it at length.
+//
+// WHAT IS DELIBERATELY NOT AN ARM.  There is no date and no time.
+// TOML has both and this tree drops them to `CfgStr` in RFC 3339
+// spelling, because a configuration merge never compares two instants
+// and a `core` package that carried a civil date would carry
+// calendar-nv with it.  A program that wants the date parses the
+// string it gets back.
+
+// A configuration value, after parsing and before merging.
+//
+// Seven arms, and the last one is the interesting one: `CfgNull` is a
+// value a layer SET, distinct from a key no layer mentioned.  YAML
+// writes it `a:`, TOML cannot write it at all, JSON writes it `null`,
+// and a program clearing an inherited setting needs the difference —
+// `cfgfault.KeyPresence` is where a caller asks for it.
+//
+// ```novo
+// use cfgvalue
+//
+// fn main() [io]
+//     let v = cfgvalue.int_value(8080)
+//     println(cfgvalue.kind_name(cfgvalue.kind_of(v)))
+// ```
+pub enum ConfigValue
+    // A table: its pairs in the order the layer wrote them.  Order is
+    // kept because a merged table renders back out in a stable order,
+    // and a caller diffing two rendered configurations should not see
+    // a change nobody made.
+    CfgTable(pairs: [ConfigPair])
+    // A list.  Lists REPLACE rather than merge — see `cfgmerge` — so
+    // nothing here needs to know how two lists would combine.
+    CfgList(items: [ConfigValue])
+    // A string, already unescaped by whatever parsed it.
+    CfgStr(value: Str)
+    // A signed 64-bit integer.
+    CfgInt(value: Int)
+    // A 64-bit float.
+    CfgFloat(value: Float)
+    // `true` or `false`.
+    CfgBool(value: Bool)
+    // The null value: a key a layer explicitly set to nothing.  NOT
+    // the absence of a key, which is no arm at all.
+    CfgNull
+
+// One key and its value, in the order the layer wrote them.
+//
+// The key is a `Str` and not a `ConfigValue`: YAML permits a
+// collection as a mapping key and this tree does not, because a
+// dotted path cannot name one and a configuration file that used one
+// would have no way to be looked up.  `config-nv`'s YAML adapter
+// refuses such a document rather than flattening it.
+pub struct ConfigPair
+    // The key as the layer spelled it.  Lookup is case-sensitive; the
+    // environment mapping in `cfgenvkeys` is what lowercases.
+    key: Str
+    // The value bound to it.
+    value: ConfigValue
+
+// Which arm a value is, as a value in its own right.
+//
+// This exists so a refusal can say "wanted an int, found a string"
+// without carrying the string — a reason a caller can match on, log or
+// render, rather than a sentence somebody already formatted.
+//
+// ```novo
+// use cfgvalue
+//
+// fn main() [io]
+//     println(cfgvalue.kind_name(KindBool))
+// ```
+pub enum ConfigKind
+    KindTable
+    KindList
+    KindStr
+    KindInt
+    KindFloat
+    KindBool
+    KindNull
+
+// The kind of a value.
+//
+// ```novo
+// use cfgvalue
+//
+// fn main() [io]
+//     let k = cfgvalue.kind_of(cfgvalue.str_value("hello"))
+//     println(cfgvalue.kind_name(k))
+// ```
+pub fn kind_of(v: ConfigValue) -> ConfigKind
+    todo("config-core-nv.cfgvalue.kind_of")
+
+// The kind's name, in the spelling a refusal uses.
+//
+// `"table"`, `"list"`, `"str"`, `"int"`, `"float"`, `"bool"`, `"null"`
+// — lower case, no punctuation, stable across releases because a
+// program's own error text quotes them.
+//
+// ```novo
+// use cfgvalue
+//
+// fn main() [io]
+//     println(cfgvalue.kind_name(KindFloat))
+// ```
+pub fn kind_name(k: ConfigKind) -> Str
+    todo("config-core-nv.cfgvalue.kind_name")
+
+// A table from its pairs, in order.
+//
+// Duplicate keys are the caller's to avoid: this constructor does not
+// deduplicate, because which of two same-named pairs a FORMAT means is
+// the format's rule and not this package's.  A lookup finds the first.
+//
+// ```novo
+// use cfgvalue
+//
+// fn main() [io]
+//     let t = cfgvalue.table([cfgvalue.pair("port", cfgvalue.int_value(80))])
+//     println(cfgvalue.kind_name(cfgvalue.kind_of(t)))
+// ```
+pub fn table(pairs: [ConfigPair]) -> ConfigValue
+    todo("config-core-nv.cfgvalue.table")
+
+// The empty table — the root of a layer that contributed nothing, and
+// the identity of the merge.
+//
+// ```novo
+// use cfgvalue
+//
+// fn main() [io]
+//     println("${cfgvalue.len_of(cfgvalue.empty_table())}")
+// ```
+pub fn empty_table() -> ConfigValue
+    todo("config-core-nv.cfgvalue.empty_table")
+
+// One pair.
+//
+// ```novo
+// use cfgvalue
+//
+// fn main() [io]
+//     let p = cfgvalue.pair("host", cfgvalue.str_value("localhost"))
+//     println(p.key)
+// ```
+pub fn pair(key: Str, value: ConfigValue) -> ConfigPair
+    todo("config-core-nv.cfgvalue.pair")
+
+// A list from its items.
+//
+// ```novo
+// use cfgvalue
+//
+// fn main() [io]
+//     let xs = cfgvalue.list_of([cfgvalue.int_value(1), cfgvalue.int_value(2)])
+//     println("${cfgvalue.len_of(xs)}")
+// ```
+pub fn list_of(items: [ConfigValue]) -> ConfigValue
+    todo("config-core-nv.cfgvalue.list_of")
+
+// A string value.  Named `str_value` rather than `str` because `str`
+// is a standard library module and a function shadowing it would make
+// every other call in the file ambiguous to a reader.
+//
+// ```novo
+// use cfgvalue
+//
+// fn main() [io]
+//     println(cfgvalue.kind_name(cfgvalue.kind_of(cfgvalue.str_value("x"))))
+// ```
+pub fn str_value(s: Str) -> ConfigValue
+    todo("config-core-nv.cfgvalue.str_value")
+
+// An integer value.
+//
+// ```novo
+// use cfgvalue
+//
+// fn main() [io]
+//     println(cfgvalue.kind_name(cfgvalue.kind_of(cfgvalue.int_value(1))))
+// ```
+pub fn int_value(n: Int) -> ConfigValue
+    todo("config-core-nv.cfgvalue.int_value")
+
+// A float value.
+//
+// ```novo
+// use cfgvalue
+//
+// fn main() [io]
+//     println(cfgvalue.kind_name(cfgvalue.kind_of(cfgvalue.float_value(1.5))))
+// ```
+pub fn float_value(f: Float) -> ConfigValue
+    todo("config-core-nv.cfgvalue.float_value")
+
+// A boolean value.
+//
+// ```novo
+// use cfgvalue
+//
+// fn main() [io]
+//     println(cfgvalue.kind_name(cfgvalue.kind_of(cfgvalue.bool_value(true))))
+// ```
+pub fn bool_value(b: Bool) -> ConfigValue
+    todo("config-core-nv.cfgvalue.bool_value")
+
+// The null value.
+//
+// ```novo
+// use cfgvalue
+//
+// fn main() [io]
+//     println(cfgvalue.kind_name(cfgvalue.kind_of(cfgvalue.null_value())))
+// ```
+pub fn null_value() -> ConfigValue
+    todo("config-core-nv.cfgvalue.null_value")
+
+// One level of a table, by key.
+//
+// `None` when the value is not a table or the key is not in it.  The
+// dotted-path walk in `cfglookup` is this repeated, with a reason kept
+// for the level that failed.
+//
+// ```novo
+// use cfgvalue
+//
+// fn main() [io]
+//     let t = cfgvalue.table([cfgvalue.pair("a", cfgvalue.int_value(1))])
+//     match cfgvalue.field(t, "a")
+//         Some(_) => println("found")
+//         None    => println("absent")
+// ```
+pub fn field(v: ConfigValue, key: Str) -> ?ConfigValue
+    todo("config-core-nv.cfgvalue.field")
+
+// The keys of a table, in order.  `[]` for anything else.
+//
+// ```novo
+// use cfgvalue
+// use std.list
+//
+// fn main() [io]
+//     let t = cfgvalue.table([cfgvalue.pair("a", cfgvalue.null_value())])
+//     println("${list.len(cfgvalue.keys_of(t))}")
+// ```
+pub fn keys_of(v: ConfigValue) -> [Str]
+    todo("config-core-nv.cfgvalue.keys_of")
+
+// How many pairs a table has, or how many items a list has.  `0` for
+// every scalar, `CfgNull` included — a scalar has no length, and
+// returning `?Int` would put an unwrap in front of every caller that
+// only wanted to know whether a table was empty.
+//
+// ```novo
+// use cfgvalue
+//
+// fn main() [io]
+//     println("${cfgvalue.len_of(cfgvalue.int_value(7))}")
+// ```
+pub fn len_of(v: ConfigValue) -> Int
+    todo("config-core-nv.cfgvalue.len_of")
+
+// Whether the value is a table.
+//
+// ```novo
+// use cfgvalue
+//
+// fn main() [io]
+//     println("${cfgvalue.is_table(cfgvalue.empty_table())}")
+// ```
+pub fn is_table(v: ConfigValue) -> Bool
+    todo("config-core-nv.cfgvalue.is_table")
+
+// Whether the value is the null value.
+//
+// This is the arm, not "is it missing" — a key nothing set never
+// reaches a `ConfigValue` at all.
+//
+// ```novo
+// use cfgvalue
+//
+// fn main() [io]
+//     println("${cfgvalue.is_null(cfgvalue.null_value())}")
+// ```
+pub fn is_null(v: ConfigValue) -> Bool
+    todo("config-core-nv.cfgvalue.is_null")
+
+// The one place a string becomes a typed value, and the only coercion
+// in the package.
+//
+// `"true"` and `"false"` are `CfgBool`; a decimal integer that fits 64
+// bits is `CfgInt`; a decimal with a point or an exponent is
+// `CfgFloat`; `"null"` is `CfgNull`; everything else, the empty string
+// included, is `CfgStr` with the text unchanged.
+//
+// It is here rather than in `cfgenvkeys` because two callers need the
+// same rule: the environment layer, whose values are always text, and
+// `config-nv`'s command-line overrides, whose values are always text
+// too.  Two spellings of one rule is how `--port=8080` and
+// `APP_PORT=8080` end up different types.
+//
+// **The typed getters do not coerce.**  `get_int` on a `CfgStr` is
+// `CfgWrongType`, not a parse.  A getter that accepted `"8080"` could
+// not tell a caller which layer's spelling it had accepted, and the
+// reason a refusal names its layer is that a configuration bug is
+// almost always "the wrong layer won".
+//
+// ```novo
+// use cfgvalue
+//
+// fn main() [io]
+//     println(cfgvalue.kind_name(cfgvalue.kind_of(cfgvalue.infer_scalar("8080"))))
+//     println(cfgvalue.kind_name(cfgvalue.kind_of(cfgvalue.infer_scalar("8080a"))))
+// ```
+pub fn infer_scalar(text: Str) -> ConfigValue
+    todo("config-core-nv.cfgvalue.infer_scalar")
+
+// `infer_scalar`'s opposite: a scalar rendered as the text a layer
+// would have written.
+//
+// `CfgStr` gives its own text, unquoted.  `CfgTable` and `CfgList`
+// give `None` — there is no one spelling of a table that every format
+// agrees on, and a package that picked one would be a serialiser.
+//
+// ```novo
+// use cfgvalue
+//
+// fn main() [io]
+//     match cfgvalue.scalar_text(cfgvalue.bool_value(false))
+//         Some(t) => println(t)
+//         None    => println("not a scalar")
+// ```
+pub fn scalar_text(v: ConfigValue) -> ?Str
+    todo("config-core-nv.cfgvalue.scalar_text")

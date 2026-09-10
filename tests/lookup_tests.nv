@@ -1,0 +1,226 @@
+// lookup_tests.nv — the API suite for the path grammar, the typed
+// getters and the three-answer presence question.
+//
+// RED ON PURPOSE: every body is a `todo()`.  Run with `--isolate` for
+// one verdict per `@test`.
+//
+// WHAT A GETTER CASE CAN ASSERT while the bodies are stubs is the
+// SHAPE of the refusal, not the value: that a wrong type is
+// `CfgWrongType` and not `CfgMissing`, that a bad path never reaches
+// the tree, that an explicit null is its own answer.  Those are the
+// decisions; the arithmetic under them is the implementation lane's.
+
+use std.test
+use std.list
+use cfgvalue
+use cfglayer
+use cfgmerge
+use cfglookup
+use cfgfault
+
+fn sample() -> MergedConfig
+    cfgmerge.merge_all([
+        cfglayer.layer("defaults", 0, cfgvalue.table([
+            cfgvalue.pair("server", cfgvalue.table([
+                cfgvalue.pair("host", cfgvalue.str_value("localhost")),
+                cfgvalue.pair("port", cfgvalue.int_value(80)),
+                cfgvalue.pair("hosts", cfgvalue.list_of([
+                    cfgvalue.str_value("a"),
+                    cfgvalue.str_value("b")]))])),
+            cfgvalue.pair("debug", cfgvalue.bool_value(false)),
+            cfgvalue.pair("timeout", cfgvalue.int_value(30))])),
+        cfglayer.layer("APP_ environment", 30, cfgvalue.table([
+            cfgvalue.pair("server", cfgvalue.table([
+                cfgvalue.pair("port", cfgvalue.str_value("8080"))])),
+            cfgvalue.pair("proxy", cfgvalue.null_value())]))])
+
+@test
+fn test_the_path_grammar_round_trips() [io]
+    test.case("an ordinary path splits into its segments")
+    match cfglookup.split("server.port")
+        Ok(segs) => test.assert(list.len(segs) == 2)
+        Err(_)   => test.fail("that path is well formed")
+
+    test.case("and path_of puts it back together")
+    test.assert(cfglookup.path_of(["server", "port"]) == "server.port")
+
+    test.case("a segment with a dot in it survives the round trip")
+    let spelled = cfglookup.path_of(["log", "my.app", "level"])
+    match cfglookup.split(spelled)
+        Ok(segs) => test.assert(segs[1] == "my.app")
+        Err(_)   => test.fail("path_of produces paths split accepts")
+
+@test
+fn test_a_bad_path_never_reaches_the_tree() [io]
+    test.case("an empty segment")
+    match cfglookup.split("a..b")
+        Ok(_)  => test.fail("an empty segment names nothing")
+        Err(e) => test.assert(cfgfault.fault_kind(e) == "bad path")
+
+    test.case("a trailing dot")
+    match cfglookup.split("a.")
+        Ok(_)  => test.fail("a trailing dot names nothing")
+        Err(_) => test.assert(true)
+
+    test.case("the empty path")
+    match cfglookup.split("")
+        Ok(_)  => test.fail("the empty path names nothing")
+        Err(_) => test.assert(true)
+
+    test.case("and a bad path blames no layer, because it never reached one")
+    match cfglookup.split("a..b")
+        Ok(_)  => test.fail("an empty segment names nothing")
+        Err(e) =>
+            match cfgfault.fault_layer(e)
+                Some(_) => test.fail("no layer saw that path")
+                None    => test.assert(true)
+
+@test
+fn test_missing_is_not_the_same_answer_as_null() [io]
+    let m = sample()
+
+    test.case("a path nothing mentions is absent")
+    test.assert(cfgfault.presence_name(cfglookup.presence(m, "nothing.here")) == "absent")
+
+    test.case("a path a layer set to null is null, and names that layer")
+    let p = cfglookup.presence(m, "proxy")
+    test.assert(cfgfault.presence_name(p) == "null")
+    match cfgfault.presence_layer(p)
+        Some(l) => test.assert(l == "APP_ environment")
+        None    => test.fail("a layer set it, on purpose")
+
+    test.case("and only a held key is usable")
+    test.assert(cfgfault.is_held(cfglookup.presence(m, "proxy")) == false)
+    test.assert(cfgfault.is_held(cfglookup.presence(m, "timeout")))
+
+@test
+fn test_a_getter_refuses_with_the_layer_that_supplied_the_value() [io]
+    let m = sample()
+
+    test.case("the environment made the port a string; get_int says so")
+    match cfglookup.get_int(m, "server.port")
+        Ok(_)  => test.fail("the winning layer holds text")
+        Err(e) =>
+            test.assert(cfgfault.fault_kind(e) == "wrong type")
+            match cfgfault.fault_layer(e)
+                Some(l) => test.assert(l == "APP_ environment")
+                None    => test.fail("a wrong type always has a layer behind it")
+
+    test.case("a missing key blames nobody")
+    match cfglookup.get_int(m, "server.backlog")
+        Ok(_)  => test.fail("nothing set that")
+        Err(e) =>
+            test.assert(cfgfault.fault_kind(e) == "missing")
+            match cfgfault.fault_layer(e)
+                Some(_) => test.fail("nothing set it, so nothing is to blame")
+                None    => test.assert(true)
+
+    test.case("an explicit null refuses as null, not as missing")
+    match cfglookup.get_str(m, "proxy")
+        Ok(_)  => test.fail("a layer cleared that")
+        Err(e) => test.assert(cfgfault.fault_kind(e) == "was null")
+
+@test
+fn test_the_getters_do_not_coerce_except_int_to_float() [io]
+    let m = sample()
+
+    test.case("a string that looks like a number is still a string")
+    match cfglookup.get_int(m, "server.port")
+        Ok(_)  => test.fail("get_int does not parse")
+        Err(_) => test.assert(true)
+
+    test.case("an int widens to a float, which is the one asymmetry")
+    match cfglookup.get_float(m, "timeout")
+        Ok(f)  => test.assert(f > 29.0)
+        Err(_) => test.fail("30 is a float when a caller asks for one")
+
+    test.case("but a float does not narrow to an int")
+    let f = cfgmerge.merge_all([cfglayer.layer("defaults", 0, cfgvalue.table([
+        cfgvalue.pair("port", cfgvalue.float_value(8080.0))]))])
+    match cfglookup.get_int(f, "port")
+        Ok(_)  => test.fail("the layer wrote 8080.0 and a caller should hear about it")
+        Err(_) => test.assert(true)
+
+@test
+fn test_walking_through_a_scalar_names_the_level_that_stopped_it() [io]
+    let m = sample()
+
+    test.case("server.host.deeper stops at server.host")
+    match cfglookup.get_value(m, "server.host.deeper")
+        Ok(_)  => test.fail("a string has no fields")
+        Err(e) =>
+            test.assert(cfgfault.fault_kind(e) == "not a table")
+            test.assert(cfgfault.fault_path(e) == "server.host.deeper")
+
+@test
+fn test_a_numeric_segment_indexes_a_list() [io]
+    let m = sample()
+
+    test.case("server.hosts.0 is the first host")
+    match cfglookup.get_str(m, "server.hosts.0")
+        Ok(s)  => test.assert(s == "a")
+        Err(_) => test.fail("the list has two entries")
+
+    test.case("and past the end is missing, not a crash")
+    match cfglookup.get_str(m, "server.hosts.9")
+        Ok(_)  => test.fail("the list has two entries")
+        Err(e) => test.assert(cfgfault.fault_kind(e) == "missing")
+
+@test
+fn test_the_list_and_table_getters() [io]
+    let m = sample()
+
+    test.case("get_list gives values")
+    match cfglookup.get_list(m, "server.hosts")
+        Ok(xs) => test.assert(list.len(xs) == 2)
+        Err(_) => test.fail("that is a list")
+
+    test.case("get_str_list refuses the whole list and names the element")
+    let mixed = cfgmerge.merge_all([cfglayer.layer("defaults", 0, cfgvalue.table([
+        cfgvalue.pair("hosts", cfgvalue.list_of([
+            cfgvalue.str_value("a"),
+            cfgvalue.int_value(2)]))]))])
+    match cfglookup.get_str_list(mixed, "hosts")
+        Ok(_)  => test.fail("the second element is an integer")
+        Err(e) => test.assert(cfgfault.fault_path(e) == "hosts.1")
+
+    test.case("get_table reads a whole section without knowing its keys")
+    match cfglookup.get_table(m, "server")
+        Ok(ps) => test.assert(list.len(ps) == 3)
+        Err(_) => test.fail("server is a table")
+
+@test
+fn test_leaf_paths_is_what_a_dump_prints() [io]
+    let m = sample()
+
+    test.case("every path it lists is one a getter can fetch")
+    let paths = cfglookup.leaf_paths(m)
+    test.assert(list.len(paths) > 0)
+    match cfglookup.get_value(m, paths[0])
+        Ok(_)  => test.assert(true)
+        Err(_) => test.fail("leaf_paths lists paths that are there")
+
+    test.case("and a list's elements are listed, not the list")
+    test.assert(list.len(paths) >= 6)
+
+@test
+fn test_the_bare_tree_walk_and_the_writer() [io]
+    test.case("value_at needs no layers")
+    let t = cfgvalue.table([cfgvalue.pair("a", cfgvalue.int_value(1))])
+    match cfglookup.value_at(t, "a")
+        Ok(v)  => test.assert(cfgvalue.kind_name(cfgvalue.kind_of(v)) == "int")
+        Err(_) => test.fail("that key is there")
+
+    test.case("with_path builds the tables on the way down")
+    match cfglookup.with_path(cfgvalue.empty_table(), "server.port", cfgvalue.int_value(80))
+        Ok(built) =>
+            match cfglookup.value_at(built, "server.port")
+                Ok(_)  => test.assert(true)
+                Err(_) => test.fail("with_path just set that")
+        Err(_)    => test.fail("that path is well formed")
+
+    test.case("and it replaces a scalar in the way, following merge rule 4")
+    let blocked = cfgvalue.table([cfgvalue.pair("server", cfgvalue.int_value(1))])
+    match cfglookup.with_path(blocked, "server.port", cfgvalue.int_value(80))
+        Ok(built) => test.assert(cfgvalue.is_table(built))
+        Err(_)    => test.fail("a scalar in the way is replaced, not refused")

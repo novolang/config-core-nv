@@ -1,0 +1,194 @@
+// envkeys_tests.nv — the API suite for the environment key mapping,
+// in both directions, with no environment anywhere in it.
+//
+// RED ON PURPOSE: every body is a `todo()`.  Run with `--isolate` for
+// one verdict per `@test`.
+//
+// THE POINT OF THESE CASES is that they run with nothing exported.
+// The mapping is a pure function over pairs the host supplies, so a
+// test can assert what `APP_SERVER__PORT=8080` produces without any
+// process ever having that variable — which is the reason the mapping
+// is in the `core` half at all.
+
+use std.test
+use std.list
+use cfglookup
+use cfgmerge
+use cfgenvkeys
+use cfgfault
+
+@test
+fn test_the_default_rule_is_the_documented_one() [io]
+    let r = cfgenvkeys.rule("APP_")
+
+    test.case("prefix, separator, case")
+    test.assert(r.prefix == "APP_")
+    test.assert(r.separator == "__")
+    test.assert(r.lowercase)
+
+    test.case("no list splitting, because a comma in a value is commoner than a list")
+    match r.list_separator
+        Some(_) => test.fail("splitting is opt-in")
+        None    => test.assert(true)
+
+    test.case("and scalars are inferred, so APP_PORT=8080 reaches get_int")
+    test.assert(r.infer_scalars)
+
+@test
+fn test_a_name_maps_to_a_path() [io]
+    let r = cfgenvkeys.rule("APP_")
+
+    test.case("the separator stands for the dot")
+    match cfgenvkeys.map_name(r, "APP_SERVER__PORT")
+        Some(p) => test.assert(p == "server.port")
+        None    => test.fail("that name carries the prefix")
+
+    test.case("a single underscore stays part of the key")
+    match cfgenvkeys.map_name(r, "APP_LOG__MAX_SIZE")
+        Some(p) => test.assert(p == "log.max_size")
+        None    => test.fail("that name carries the prefix")
+
+    test.case("a name with no separator is a one-segment path")
+    match cfgenvkeys.map_name(r, "APP_DEBUG")
+        Some(p) => test.assert(p == "debug")
+        None    => test.fail("that name carries the prefix")
+
+    test.case("and a name without the prefix is not ours")
+    match cfgenvkeys.map_name(r, "PATH")
+        Some(_) => test.fail("PATH is not this program's setting")
+        None    => test.assert(true)
+
+@test
+fn test_name_for_is_the_direction_a_host_actually_needs() [io]
+    let r = cfgenvkeys.rule("APP_")
+
+    test.case("a path maps back to the name to look up")
+    match cfgenvkeys.name_for(r, "server.port")
+        Some(n) => test.assert(n == "APP_SERVER__PORT")
+        None    => test.fail("that path has a name")
+
+    test.case("and it is map_name's inverse")
+    match cfgenvkeys.name_for(r, "log.max_size")
+        Some(n) =>
+            match cfgenvkeys.map_name(r, n)
+                Some(p) => test.assert(p == "log.max_size")
+                None    => test.fail("a name this rule produced is a name it accepts")
+        None    => test.fail("that path has a name")
+
+    test.case("a path a shell could not export gives None rather than mangling")
+    match cfgenvkeys.name_for(r, "my-setting")
+        Some(_) => test.fail("a hyphen is not exportable, and A_B would collide with a.b")
+        None    => test.assert(true)
+
+    test.case("names_for is the call shape: the program's paths, the names to read")
+    test.assert(list.len(cfgenvkeys.names_for(r, ["server.port", "debug"])) == 2)
+    test.assert(list.len(cfgenvkeys.names_for(r, ["my-setting"])) == 0)
+
+@test
+fn test_a_layer_from_pairs_needs_no_environment() [io]
+    let r = cfgenvkeys.rule("APP_")
+    let l = cfgenvkeys.layer_from(r, [
+        ("APP_SERVER__PORT", "8080"),
+        ("APP_DEBUG", "true"),
+        ("PATH", "/usr/bin")],
+    "APP_ environment", 30)
+
+    test.case("the layer carries the name and rank it was given")
+    test.assert(l.name == "APP_ environment")
+    test.assert(l.rank == 30)
+
+    test.case("two of the three pairs became paths")
+    let m = cfgmerge.merge_all([l])
+    match cfglookup.get_int(m, "server.port")
+        Ok(n)  => test.assert(n == 8080)
+        Err(_) => test.fail("infer_scalars is on, so 8080 is an int")
+
+    test.case("and the value was typed, not left as text")
+    match cfglookup.get_bool(m, "debug")
+        Ok(b)  => test.assert(b)
+        Err(_) => test.fail("infer_scalars is on, so true is a bool")
+
+    test.case("the pair without the prefix contributed nothing")
+    test.assert(cfgfault.presence_name(cfglookup.presence(m, "path")) == "absent")
+
+@test
+fn test_the_skipped_names_are_named_rather_than_swallowed() [io]
+    let r = cfgenvkeys.rule("APP_")
+
+    test.case("the single-underscore mistake, which is the commonest one")
+    let skipped = cfgenvkeys.skipped_names(r, [
+        ("APP_SERVER__PORT", "8080"),
+        ("PATH", "/usr/bin")])
+    test.assert(list.len(skipped) == 1)
+
+    test.case("and a rule with no prefix claims everything")
+    let all = cfgenvkeys.rule("")
+    test.assert(list.len(cfgenvkeys.skipped_names(all, [("PATH", "/usr/bin")])) == 0)
+
+@test
+fn test_the_last_pair_of_a_name_wins() [io]
+    let r = cfgenvkeys.rule("APP_")
+    let l = cfgenvkeys.layer_from(r, [
+        ("APP_PORT", "80"),
+        ("APP_PORT", "8080")],
+    "environment", 30)
+
+    test.case("which is what a shell does when a variable is exported twice")
+    match cfglookup.get_int(cfgmerge.merge_all([l]), "port")
+        Ok(n)  => test.assert(n == 8080)
+        Err(_) => test.fail("the later pair stands")
+
+@test
+fn test_the_command_line_takes_paths_not_names() [io]
+    test.case("a path is used as written, with no lowercasing or re-separating")
+    let l = cfgenvkeys.layer_from_paths([
+        ("server.port", "8080"),
+        ("log.max_size", "1024")],
+    "--set", 40)
+    let m = cfgmerge.merge_all([l])
+    match cfglookup.get_int(m, "log.max_size")
+        Ok(n)  => test.assert(n == 1024)
+        Err(_) => test.fail("--set spells its own paths")
+
+    test.case("the values are typed by the same rule text always goes through")
+    match cfglookup.get_int(m, "server.port")
+        Ok(n)  => test.assert(n == 8080)
+        Err(_) => test.fail("infer_scalar is the one coercion, and it runs here too")
+
+@test
+fn test_one_bad_flag_does_not_cost_the_others() [io]
+    test.case("the good pairs land")
+    let l = cfgenvkeys.layer_from_paths([
+        ("server.port", "8080"),
+        ("a..b", "1")],
+    "--set", 40)
+    match cfglookup.get_int(cfgmerge.merge_all([l]), "server.port")
+        Ok(n)  => test.assert(n == 8080)
+        Err(_) => test.fail("a bad flag beside a good one should not lose the good one")
+
+    test.case("and the bad one is reported with its fault")
+    let bad = cfgenvkeys.bad_paths([("server.port", "8080"), ("a..b", "1")])
+    test.assert(list.len(bad) == 1)
+    test.assert(cfgfault.fault_kind(bad[0]) == "bad path")
+
+@test
+fn test_list_splitting_is_opt_in_and_then_works() [io]
+    let plain = cfgenvkeys.rule("APP_")
+    let split = EnvKeyRule {
+        prefix: "APP_",
+        separator: "__",
+        lowercase: true,
+        list_separator: Some(","),
+        infer_scalars: true }
+
+    test.case("off by default: a comma stays inside one string")
+    let one = cfgenvkeys.layer_from(plain, [("APP_HOSTS", "a,b")], "environment", 30)
+    match cfglookup.get_str(cfgmerge.merge_all([one]), "hosts")
+        Ok(s)  => test.assert(s == "a,b")
+        Err(_) => test.fail("without a list separator the value is one string")
+
+    test.case("and on, the same value is a list of two")
+    let many = cfgenvkeys.layer_from(split, [("APP_HOSTS", "a,b")], "environment", 30)
+    match cfglookup.get_str_list(cfgmerge.merge_all([many]), "hosts")
+        Ok(xs) => test.assert(list.len(xs) == 2)
+        Err(_) => test.fail("with a list separator the value splits")

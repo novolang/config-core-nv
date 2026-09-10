@@ -1,0 +1,271 @@
+// cfglookup.nv — dotted paths, and the typed getters that refuse with
+// a reason.
+//
+// THE PATH GRAMMAR, in three lines:
+//
+//   a path is one or more segments joined by `.`
+//   a segment that is only digits indexes a LIST
+//   `\.` inside a segment is a literal dot, `\\` a literal backslash
+//
+// So `server.hosts.0` is the first host, `log."my.app".level` is not
+// the spelling — there are no quotes — and `log.my\.app.level` is.
+// One escape and no quoting keeps the grammar something a person can
+// hold in their head, and it round-trips: `path_of(split(p)) == p`.
+//
+// A NUMERIC SEGMENT AGAINST A TABLE reads the table's key `"0"`, not
+// an index, because a TOML table may honestly have a key called `0`
+// and refusing it would make some documents unreachable.  The segment
+// is an index only when the value at that level is a list.
+//
+// THE GETTERS DO NOT COERCE.  `get_int` on `CfgStr("8080")` is
+// `CfgWrongType`, naming the layer that supplied the string.  The one
+// coercion in the package is `cfgvalue.infer_scalar`, applied where a
+// layer is BUILT from text, so that a program can see in a provenance
+// answer that the environment layer holds an int — rather than
+// discovering at every call site that a getter was lenient.
+
+// Split a path into its segments, applying the escapes.
+//
+// `CfgBadPath` for an empty path, an empty segment (`a..b`, a leading
+// or trailing dot) or a backslash at the end of the path.
+//
+// ```novo
+// use cfglookup
+// use std.list
+//
+// fn main() [io]
+//     match cfglookup.split("server.port")
+//         Ok(segs) => println("${list.len(segs)}")
+//         Err(_)   => println("bad path")
+// ```
+pub fn split(path: Str) -> Result<[Str], ConfigFault>
+    todo("config-core-nv.cfglookup.split")
+
+// Join segments into a path, escaping the dots and backslashes in
+// them.
+//
+// The inverse of `split` on every input `split` accepts, which is why
+// the escape exists at all.
+//
+// ```novo
+// use cfglookup
+//
+// fn main() [io]
+//     println(cfglookup.path_of(["log", "my.app", "level"]))
+// ```
+pub fn path_of(segments: [Str]) -> Str
+    todo("config-core-nv.cfglookup.path_of")
+
+// The value at a path, or the reason there is none.
+//
+// The one walk every typed getter is written on top of.  Its refusals
+// are the three shapes of "not there": `CfgBadPath` before the tree is
+// touched, `CfgNotATable` part way down, `CfgMissing` at the leaf.
+//
+// ```novo
+// use cfglookup
+// use cfgmerge
+//
+// fn main() [io]
+//     match cfglookup.get_value(cfgmerge.empty(), "server.port")
+//         Ok(_)  => println("found")
+//         Err(e) => println(cfgfault.fault_kind(e))
+// ```
+pub fn get_value(m: MergedConfig, path: Str) -> Result<ConfigValue, ConfigFault>
+    todo("config-core-nv.cfglookup.get_value")
+
+// Whether a path is set, and by whom.
+//
+// The question to ask before a default: `KeyAbsent` means nothing
+// mentioned it and a default is right; `KeyWasNull` means a layer
+// cleared it on purpose and a default would undo that.
+//
+// ```novo
+// use cfglookup
+// use cfgmerge
+// use cfgfault
+//
+// fn main() [io]
+//     println(cfgfault.presence_name(cfglookup.presence(cfgmerge.empty(), "a.b")))
+// ```
+pub fn presence(m: MergedConfig, path: Str) -> KeyPresence
+    todo("config-core-nv.cfglookup.presence")
+
+// A string at a path.
+//
+// `CfgWrongType` for any other kind, naming the layer that set it.
+//
+// ```novo
+// use cfglookup
+// use cfgmerge
+//
+// fn main() [io]
+//     match cfglookup.get_str(cfgmerge.empty(), "server.host")
+//         Ok(s)  => println(s)
+//         Err(_) => println("no host")
+// ```
+pub fn get_str(m: MergedConfig, path: Str) -> Result<Str, ConfigFault>
+    todo("config-core-nv.cfglookup.get_str")
+
+// An integer at a path.
+//
+// A `CfgFloat` is NOT accepted, even one whose fraction is zero: the
+// layer wrote `8080.0` and a program that wanted a port should hear
+// about it.
+//
+// ```novo
+// use cfglookup
+// use cfgmerge
+//
+// fn main() [io]
+//     match cfglookup.get_int(cfgmerge.empty(), "server.port")
+//         Ok(n)  => println("${n}")
+//         Err(_) => println("no port")
+// ```
+pub fn get_int(m: MergedConfig, path: Str) -> Result<Int, ConfigFault>
+    todo("config-core-nv.cfglookup.get_int")
+
+// A float at a path.
+//
+// A `CfgInt` IS accepted and widened — this is the one asymmetry, and
+// it is the one every language already has: `timeout = 30` in a file
+// whose author meant seconds should not refuse a float getter.
+//
+// ```novo
+// use cfglookup
+// use cfgmerge
+//
+// fn main() [io]
+//     match cfglookup.get_float(cfgmerge.empty(), "timeout")
+//         Ok(f)  => println("${f}")
+//         Err(_) => println("no timeout")
+// ```
+pub fn get_float(m: MergedConfig, path: Str) -> Result<Float, ConfigFault>
+    todo("config-core-nv.cfglookup.get_float")
+
+// A boolean at a path.
+//
+// `CfgStr("true")` is refused; `cfgvalue.infer_scalar` is what turns
+// the environment's text into a `CfgBool`, and it runs when the layer
+// is built.
+//
+// ```novo
+// use cfglookup
+// use cfgmerge
+//
+// fn main() [io]
+//     match cfglookup.get_bool(cfgmerge.empty(), "debug")
+//         Ok(b)  => println("${b}")
+//         Err(_) => println("not set")
+// ```
+pub fn get_bool(m: MergedConfig, path: Str) -> Result<Bool, ConfigFault>
+    todo("config-core-nv.cfglookup.get_bool")
+
+// A list at a path, as values.
+//
+// ```novo
+// use cfglookup
+// use cfgmerge
+// use std.list
+//
+// fn main() [io]
+//     match cfglookup.get_list(cfgmerge.empty(), "server.hosts")
+//         Ok(xs) => println("${list.len(xs)}")
+//         Err(_) => println("no hosts")
+// ```
+pub fn get_list(m: MergedConfig, path: Str) -> Result<[ConfigValue], ConfigFault>
+    todo("config-core-nv.cfglookup.get_list")
+
+// A list of strings at a path.
+//
+// Refuses the whole list if any element is not a string, naming the
+// path of the ELEMENT — `server.hosts.2` — because a list that is
+// mostly strings is the common shape of a hand-edited mistake.
+//
+// ```novo
+// use cfglookup
+// use cfgmerge
+// use std.list
+//
+// fn main() [io]
+//     match cfglookup.get_str_list(cfgmerge.empty(), "server.hosts")
+//         Ok(xs) => println("${list.len(xs)}")
+//         Err(e) => println(cfgfault.fault_path(e))
+// ```
+pub fn get_str_list(m: MergedConfig, path: Str) -> Result<[Str], ConfigFault>
+    todo("config-core-nv.cfglookup.get_str_list")
+
+// A table at a path, as its pairs.
+//
+// For a program that reads a whole section — a map of log levels by
+// module name — without knowing the keys in advance.
+//
+// ```novo
+// use cfglookup
+// use cfgmerge
+// use std.list
+//
+// fn main() [io]
+//     match cfglookup.get_table(cfgmerge.empty(), "log.levels")
+//         Ok(ps) => println("${list.len(ps)}")
+//         Err(_) => println("no levels")
+// ```
+pub fn get_table(m: MergedConfig, path: Str) -> Result<[ConfigPair], ConfigFault>
+    todo("config-core-nv.cfglookup.get_table")
+
+// Every path in the merged tree that holds a scalar, in tree order.
+//
+// What a `--dump-config` writes, and what a test compares.  Tables and
+// lists are not listed as paths of their own; a list's ELEMENTS are,
+// with their numeric segments, so every line names something a getter
+// can fetch.
+//
+// ```novo
+// use cfglookup
+// use cfgmerge
+// use std.list
+//
+// fn main() [io]
+//     println("${list.len(cfglookup.leaf_paths(cfgmerge.empty()))}")
+// ```
+pub fn leaf_paths(m: MergedConfig) -> [Str]
+    todo("config-core-nv.cfglookup.leaf_paths")
+
+// The same walk against a bare tree, for a caller with no layers.
+//
+// The refusals it can raise are the same minus the layer: a fault
+// from here names `""` where a merged lookup would name the layer,
+// because there is no layer to name.  A program that wants the layer
+// merges first.
+//
+// ```novo
+// use cfglookup
+// use cfgvalue
+//
+// fn main() [io]
+//     match cfglookup.value_at(cfgvalue.empty_table(), "a.b")
+//         Ok(_)  => println("found")
+//         Err(_) => println("absent")
+// ```
+pub fn value_at(root: ConfigValue, path: Str) -> Result<ConfigValue, ConfigFault>
+    todo("config-core-nv.cfglookup.value_at")
+
+// A tree with one path set, creating the tables on the way down.
+//
+// The building block a host uses to turn a flat list of
+// `(path, value)` pairs — which is what the environment and the
+// command line both are — into a layer's tree.  An existing scalar in
+// the way is replaced, following merge rule 4, so the result is
+// always the tree the last write asked for.
+//
+// ```novo
+// use cfglookup
+// use cfgvalue
+//
+// fn main() [io]
+//     match cfglookup.with_path(cfgvalue.empty_table(), "server.port", cfgvalue.int_value(80))
+//         Ok(t)  => println("${cfgvalue.len_of(t)}")
+//         Err(_) => println("bad path")
+// ```
+pub fn with_path(root: ConfigValue, path: Str, v: ConfigValue) -> Result<ConfigValue, ConfigFault>
+    todo("config-core-nv.cfglookup.with_path")

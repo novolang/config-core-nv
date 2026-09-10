@@ -1,0 +1,107 @@
+// embedded_probe.nv — the device claim, and why it is red today.
+//
+// This is not a test; the shard audit cross-compiles it for
+// `--target=nrf52-qemu` and boots it.  What it would prove is the
+// thing a host test cannot: that the value tree, the dotted-path walk
+// and the typed getters LINK on a Cortex-M — no allocator beyond the
+// tree the firmware was handed, no file, no environment.
+//
+// WHY A DEVICE WOULD WANT THIS.  A firmware image carries a settings
+// table built at compile time: the radio channel, the sample interval,
+// the calibration constants.  `cfglookup.get_int(table, "radio.chan")`
+// against a `ConfigValue` baked into flash is the same question a
+// server asks of a TOML file, and it is integer and string arithmetic
+// with nothing underneath it.  That is a real claim and this file
+// makes it.
+//
+// WHY IT DOES NOT BUILD.  Every getter in `cfglookup` returns
+// `Result<_, ConfigFault>`, and `Result<T, E>` cannot be used at
+// `@tier(embedded)`: the `Error` trait is not in that tier's prelude,
+// so a package's own error type cannot implement it, and `Str` does
+// not implement it there either — so there is no `E` at all.  The
+// refusal is `E2005` on the impl or `E2018` on the signature,
+// depending on which `E` is tried.
+//
+// The design is not being routed around for it.  A getter that could
+// not say WHICH LAYER supplied the wrong value would not be worth
+// returning — that reason is the package's whole argument — so
+// `Result` stays where the design wants it and this row stays red.
+// The filing is `result-is-unusable-at-tier-embedded-no-error-trait`
+// against the embedded runtime; when it closes, this probe builds with
+// no change to the package.
+//
+// WHAT IS NOT HERE, AND WOULD NOT BE EVEN THEN.  `cfgenvkeys` — the
+// environment does not exist on a device, and the mapping is only
+// useful to a host that can read one.  `cfgmerge.history_of` — it
+// walks a list of layers to answer a debugging question, and a
+// firmware with one baked-in layer has no history to walk.
+
+use std.str
+use cfgvalue
+use cfglookup
+
+// Every answer this probe checks, folded into one number so a single
+// comparison decides the run.  A firmware image has one line of
+// output; making it depend on all of them is what stops a passing run
+// from meaning "the first assertion held".
+@tier(rt)
+fn score() -> Int
+    var n = 0
+    // The tree, built the way a firmware would build one: constants
+    // in flash, no parser anywhere.
+    let radio = cfgvalue.table([
+        cfgvalue.pair("chan", cfgvalue.int_value(37)),
+        cfgvalue.pair("power", cfgvalue.int_value(0 - 4))])
+    let root = cfgvalue.table([
+        cfgvalue.pair("radio", radio),
+        cfgvalue.pair("interval_ms", cfgvalue.int_value(1000)),
+        cfgvalue.pair("name", cfgvalue.str_value("sensor-1"))])
+    // The arms tell themselves apart.
+    if cfgvalue.is_table(root)
+        n = n + 1
+    if cfgvalue.len_of(root) == 3
+        n = n + 1
+    if cfgvalue.is_null(cfgvalue.int_value(1)) == false
+        n = n + 1
+    // One level, which is the walk repeated.
+    if cfgvalue_field_is_table(root, "radio")
+        n = n + 1
+    // The path grammar: joining is arithmetic over bytes and needs no
+    // error channel, so it is the half of the walk that would reach a
+    // device even if the getters could not.
+    if cfglookup_path_is("radio.chan")
+        n = n + 1
+    if cfgvalue.len_of(cfgvalue.list_of([])) == 0
+        n = n + 1
+    n
+
+// `path_of` with the answer compared here rather than returned, so the
+// probe has no `Result` in it of its own.
+@tier(rt)
+fn cfglookup_path_is(want: Str) -> Bool
+    cfglookup.path_of(["radio", "chan"]) == want
+
+// One level of the tree, folded to a boolean so the caller has no arm
+// that does nothing.
+@tier(rt)
+fn cfgvalue_field_is_table(root: ConfigValue, key: Str) -> Bool
+    match cfgvalue.field(root, key)
+        Some(v) => cfgvalue.is_table(v)
+        None    => false
+
+@tier(rt)
+fn main() [hw, time]
+    bsp.board.init()
+    // 6 is the number of checks in `score`.  The count is printed on a
+    // failure rather than only compared, so a device that disagrees
+    // with the host says HOW MANY it lost and a bisect has somewhere
+    // to start.
+    let n = score()
+    if n == 6
+        hal.uart.write("PASS: config-core-embedded\n")
+    else
+        hal.uart.write("FAIL: config-core-embedded score=")
+        hal.uart.write(str.from_int(n))
+        hal.uart.write("\n")
+    loop
+        core.rt.sleep_ms(1000)

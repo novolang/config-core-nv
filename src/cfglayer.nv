@@ -1,0 +1,140 @@
+// cfglayer.nv — a named source of values with a precedence.
+//
+// A LAYER IS THREE THINGS and none of them is a file: a name, a rank
+// and a tree.  Where the tree came from is the host's business —
+// `config-nv` builds one from a TOML file, one from the environment,
+// one from `.env`, one from the command line — and by the time it is
+// here it is a value like any other.  That is the whole reason this
+// package can be `core`: the merge does not know what a file is.
+//
+// THE NAME IS LOAD-BEARING.  It is what `cfgmerge.origin_of` answers
+// with and what every refusal in `cfgfault` blames, so it should read
+// as the place a person would go to change the setting —
+// `"/etc/app.toml"`, `"APP_ environment"`, `"--set"` — and not as a
+// type (`"toml"`, `"env"`), which tells a reader nothing about which
+// of three TOML files won.
+//
+// RANKS ARE INTEGERS AND NOT AN ORDERING OF THE LIST because a
+// program assembles its layers in the order that is convenient to
+// write and wants them applied in the order the documentation
+// promises.  `cfgmerge.merge_all` sorts by rank and merges upward;
+// ties keep the order of the list, so a caller that does not care can
+// hand every layer rank 0 and get list order.
+
+// A named source of values with a precedence.
+//
+// ```novo
+// use cfglayer
+// use cfgvalue
+//
+// fn main() [io]
+//     let l = cfglayer.layer("defaults", 0, cfgvalue.empty_table())
+//     println(l.name)
+// ```
+pub struct ConfigLayer
+    // What a provenance answer and a refusal call this source.
+    name: Str
+    // Precedence.  Higher wins; equal ranks keep list order.
+    rank: Int
+    // The values, as a tree.  A layer whose root is not a table is
+    // accepted here and refused by the merge — see `cfgmerge` — so
+    // that a bad adapter is caught at the merge with both layers
+    // named, rather than here with only one.
+    root: ConfigValue
+
+// A layer.
+//
+// ```novo
+// use cfglayer
+// use cfgvalue
+//
+// fn main() [io]
+//     let l = cfglayer.layer("/etc/app.toml", 10, cfgvalue.empty_table())
+//     println("${l.rank}")
+// ```
+pub fn layer(name: Str, rank: Int, root: ConfigValue) -> ConfigLayer
+    todo("config-core-nv.cfglayer.layer")
+
+// The same layer under a different name.
+//
+// For a host that built a layer generically and knows the path only
+// afterwards.
+//
+// ```novo
+// use cfglayer
+// use cfgvalue
+//
+// fn main() [io]
+//     let l = cfglayer.layer("file", 10, cfgvalue.empty_table())
+//     println(cfglayer.renamed(l, "/etc/app.toml").name)
+// ```
+pub fn renamed(l: ConfigLayer, name: Str) -> ConfigLayer
+    todo("config-core-nv.cfglayer.renamed")
+
+// The same layer at a different rank.
+//
+// ```novo
+// use cfglayer
+// use cfgvalue
+//
+// fn main() [io]
+//     let l = cfglayer.layer("defaults", 0, cfgvalue.empty_table())
+//     println("${cfglayer.reranked(l, 5).rank}")
+// ```
+pub fn reranked(l: ConfigLayer, rank: Int) -> ConfigLayer
+    todo("config-core-nv.cfglayer.reranked")
+
+// The layers in the order the merge applies them: ascending rank,
+// list order within a rank.
+//
+// Exposed rather than kept inside the merge because a program that
+// prints "these are the sources, in order" should print the order the
+// merge will use and not a second opinion about it.
+//
+// ```novo
+// use cfglayer
+// use cfgvalue
+// use std.list
+//
+// fn main() [io]
+//     let a = cfglayer.layer("defaults", 0, cfgvalue.empty_table())
+//     let b = cfglayer.layer("environment", 20, cfgvalue.empty_table())
+//     println("${list.len(cfglayer.in_order([b, a]))}")
+// ```
+pub fn in_order(ls: [ConfigLayer]) -> [ConfigLayer]
+    todo("config-core-nv.cfglayer.in_order")
+
+// The layer with this name, or `None`.
+//
+// Names are not required to be unique — two files with the same
+// basename are two honest layers — and this finds the FIRST, in list
+// order.  A program that needs them unique checks that itself.
+//
+// ```novo
+// use cfglayer
+// use cfgvalue
+//
+// fn main() [io]
+//     let a = cfglayer.layer("defaults", 0, cfgvalue.empty_table())
+//     match cfglayer.named([a], "defaults")
+//         Some(l) => println(l.name)
+//         None    => println("no such layer")
+// ```
+pub fn named(ls: [ConfigLayer], name: Str) -> ?ConfigLayer
+    todo("config-core-nv.cfglayer.named")
+
+// The highest rank in a list, or `0` for an empty list.
+//
+// What a host calls to put a new layer on top of everything it has
+// without tracking a counter of its own.
+//
+// ```novo
+// use cfglayer
+// use cfgvalue
+//
+// fn main() [io]
+//     let a = cfglayer.layer("defaults", 3, cfgvalue.empty_table())
+//     println("${cfglayer.top_rank([a])}")
+// ```
+pub fn top_rank(ls: [ConfigLayer]) -> Int
+    todo("config-core-nv.cfglayer.top_rank")

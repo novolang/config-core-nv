@@ -1,0 +1,39 @@
+[package]
+name        = "config-core-nv"
+version     = "0.0.1"
+description = "The merge algebra of a layered configuration: one value tree, layers with a precedence, deep-merging tables and replacing arrays, dotted-path lookup whose refusals carry a reason and a layer, environment-variable key mapping as a pure function, and a provenance answer for every key. No file, no environment, no clock."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`.  Everything here is arithmetic over a tree the caller already
+# holds: merging two layers, walking a dotted path, turning a list of
+# `(name, value)` pairs into a layer.  Nothing is read and nothing is
+# written.  The half that opens a file, reads the process environment
+# and parses a `.env` is `config-nv`, which depends on this one.
+layer       = "core"
+
+category    = "tooling"
+
+tags        = ["config", "configuration", "layered", "merge", "dotenv", "figment", "precedence"]
+repository  = "https://github.com/novolang/config-core-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "Layering configuration values that are already parsed"
+
+[dependencies]
+# None, and the choice is argued in the README under "How a TomlValue
+# gets in".  Depending on toml-nv and yaml-nv to carry three adapter
+# functions would put two parsers and calendar-nv in the closure of
+# every consumer that only wanted to merge two tables; the adapters live
+# in `config-nv`, which needs those parsers anyway.
