@@ -1,6 +1,6 @@
 [package]
 name        = "config-core-nv"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "The merge algebra of a layered configuration: one value tree, layers with a precedence, deep-merging tables and replacing arrays, dotted-path lookup whose refusals carry a reason and a layer, environment-variable key mapping as a pure function, and a provenance answer for every key. No file, no environment, no clock."
 license     = "Apache-2.0"
 

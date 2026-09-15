@@ -5,6 +5,10 @@ All notable changes to config-core-nv are recorded here. The format is
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the pre-1.0 rule that a breaking change bumps the MINOR number.
 
+## 0.0.2 — 2026-09-15
+
+README rewritten to the package README style guide (docs/writing-a-readme.md); no change to the interface.
+
 ## 0.0.1 — 2026-09-10
 
 The **interface**: every signature and every effect row, and no bodies.
@@ -42,3 +46,24 @@ The **interface**: every signature and every effect row, and no bodies.
   here returns one on purpose, so the probe folds each answer to a
   `Bool` instead. The filing is
   `result-is-unusable-at-tier-embedded-no-error-trait`.
+
+### Design notes
+
+- One common value tree rather than an adapter per format. A merge has
+  to compare two values that came from different formats before "later
+  layer wins" has an answer, and three trees make that comparison a
+  matrix.
+- The format adapters live in config-nv rather than here. That package
+  depends on the parsers anyway. Putting them here would give every
+  consumer that only wanted to merge two tables a closure containing
+  toml-nv, yaml-nv and calendar-nv.
+- `std.json`'s value is an opaque handle whose accessors return an
+  optional `Any`, so its adapter has to discover an arm by trying the
+  table accessor, then the list accessor, then the scalar casts, in
+  that order. That is written down in config-nv's `cfgadapt`.
+- The type names carry a prefix because bare names collide across a
+  registry and enum variants collide across an assembly: `Error` is a
+  standard-library trait, `Config`, `Provenance` and `Source` are
+  already taken, and `str` is a standard-library module.
+- Interpolation is a candidate for 0.2, with the resolution order
+  across layers written down before any code.
