@@ -19,7 +19,6 @@
 // device with a heap.
 
 use std.str
-use std.math
 
 // A configuration value, after parsing and before merging.
 //
@@ -270,10 +269,10 @@ pub @tier(rt)
 fn field(v: ConfigValue, key: Str) -> ?ConfigValue
     match v
         CfgTable(pairs) =>
-            let at = index_of_key(pairs, key)
-            if at < 0
-                return None
-            Some(pairs[at].value)
+            for p in pairs
+                if p.key == key
+                    return Some(p.value)
+            None
         _               => None
 
 // The keys of a table, in order.  `[]` for anything else.
@@ -376,7 +375,7 @@ fn infer_scalar(text: Str) -> ConfigValue
     if text == "null"
         return CfgNull
     if is_integer_text(text)
-        if let Some(n) = integer_value(text)
+        if let Some(n) = str.to_int(text)
             return CfgInt(n)
         return CfgStr(text)
     if is_float_text(text)
@@ -423,32 +422,6 @@ fn is_integer_text(text: Str) -> Bool
         if not is_digit(str.byte_at_or(text, k, 0))
             return false
     true
-
-// The value of text `is_integer_text` accepted, or `None` when it does
-// not fit in 64 bits.  A negative number is accumulated downward, so
-// the most negative `Int` fits too.
-@tier(rt)
-fn integer_value(text: Str) -> ?Int
-    let n = str.len(text)
-    let first = str.byte_at_or(text, 0, 0)
-    let negative = first == '-'
-    var start = 0
-    if is_sign(first)
-        start = 1
-    let low = math.min_int()
-    let high = math.max_int()
-    var v = 0
-    for k in start..n
-        let d = str.byte_at_or(text, k, 0) - '0'
-        if negative
-            if v < (low + d) / 10
-                return None
-            v = v * 10 - d
-        else
-            if v > (high - d) / 10
-                return None
-            v = v * 10 + d
-    Some(v)
 
 // Whether `text` is a decimal float: an optional sign, digits with a
 // point or an exponent, at least one digit before any exponent, and
@@ -501,11 +474,3 @@ fn float_text(f: Float) -> Str
     if str.contains(t, ".") or str.contains(t, "e") or str.contains(t, "n")
         return t
     t + ".0"
-
-// The index of the first pair with this key, or -1.
-@tier(rt)
-fn index_of_key(pairs: [ConfigPair], key: Str) -> Int
-    for i in 0..list.len(pairs)
-        if pairs[i].key == key
-            return i
-    0 - 1
