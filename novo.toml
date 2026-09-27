@@ -24,9 +24,9 @@ category    = "tooling"
 tags        = ["config", "configuration", "layered", "merge", "dotenv", "figment", "precedence"]
 repository  = "https://github.com/novolang/config-core-nv"
 maintainers = ["novo-lang"]
-# 0.12.0 is the first toolchain with list slicing and `if let`, which
-# the bodies use.
-novo        = ">= 0.12.0"
+# 0.13.0 is the first toolchain whose device runtime carries
+# `str.to_int` and `str.from_byte`, which the bodies use.
+novo        = ">= 0.13.0"
 
 # A library: no `main`, so `novo pkg build` type-checks and
 # effect-checks every module under `src/` and writes no binary.

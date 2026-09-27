@@ -52,7 +52,16 @@ dotted-path getters, and the environment mapping in both directions.
 - `merge_tests.nv`'s ordering case listed two equal-rank layers in the
   opposite order to the one it expected; it now lists them in the
   order the rule keeps.
-- The toolchain floor is 0.12.0.
+- `edges_tests.nv` checks that `infer_scalar` reads
+  `"-9223372036854775808"` as the most negative integer.
+
+### Toolchain
+
+- The toolchain floor is 0.13.0. The bodies are written for it and use
+  no workaround: a field read answers from inside the loop that finds
+  it, and integers, escaped bytes and list indices are read with
+  `str.to_int` and `str.from_byte`, which build for a device from that
+  release.
 
 ## 0.0.2 — 2026-09-15
 
