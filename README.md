@@ -14,11 +14,6 @@ environment and has no clock. The package that does those things is
 [config-nv](https://novo-lang.org/packages/config-nv), which depends on this
 one.
 
-**Status: NOT IMPLEMENTED — interface only.** Every function is declared with
-its full signature, but every body is a `todo()` that panics when called. The
-package is published so its design can be reviewed and depended on before it is
-implemented. Version 0.1.0 will be the first working release.
-
 ## What it is
 
 A **configuration value** is one node of a tree. `ConfigValue` has seven arms:
@@ -38,7 +33,8 @@ name of the layer that set it. That record is the **provenance**, and
 `cfgmerge.origin_of` is how a caller reads it.
 
 A **dotted path** names a place in the tree: `server.port` is the key `port`
-inside the table `server`. A segment that is only digits indexes a list.
+inside the table `server`. A segment that is the decimal spelling of an index
+indexes a list.
 `\.` inside a segment is a literal dot and `\\` is a literal backslash. There
 are no quotes, so `log.my\.app.level` is how a key containing a dot is spelled.
 
@@ -88,8 +84,7 @@ fn main() [io]
         None    => println("nothing set it")
 ```
 
-Build and test with `novo pkg build` and `novo test`. Today `novo test` fails
-on purpose: every test reaches a `not implemented` panic.
+The program prints `8080` and `set by APP_ environment`.
 
 ## What the package contains
 
@@ -150,17 +145,21 @@ costs a walk and is called only when somebody asks.
 9. **Text becomes a typed value exactly once, at `cfgvalue.infer_scalar`, and
    only where a layer is built from text.** `"true"` and `"false"` become
    booleans, a decimal integer that fits 64 bits becomes an integer, a decimal
-   with a point or an exponent becomes a float, `"null"` becomes null, and
-   everything else stays a string unchanged.
+   with a point or an exponent that fits a 64-bit float becomes a float,
+   `"null"` becomes null, and everything else stays a string unchanged,
+   `"True"` and `"99999999999999999999"` included.
 10. **A numeric path segment indexes a list, and reads a table's key.**
     `server.hosts.0` is the first host when `hosts` is a list. Against a table,
-    `0` is the key spelled `"0"`, because a TOML table may honestly have one.
+    `0` is the key spelled `"0"`, because a TOML table may have one. Only the
+    plain decimal spelling indexes: `server.hosts.00` is missing.
 11. **Lookup is case-sensitive.** The one place anything is lowercased is the
     environment mapping in `cfgenvkeys`, where it is part of the documented
     correspondence.
 12. **A layer whose root is not a table contributes nothing and is reported.**
     `merge_all` does not raise. `cfgmerge.refused_layers` lists what it would
     not take, so one bad adapter does not cost a program its other sources.
+    `cfgenvkeys.skipped_names` does the same for environment names the rule
+    does not map, with the reason for each.
 13. **Nothing here reads the environment.** `cfgenvkeys` is a function over a
     list of `(name, value)` pairs the caller supplies. The default rule maps
     `APP_SERVER__PORT` to `server.port`: the prefix is `APP_`, the separator is
@@ -176,30 +175,28 @@ costs a walk and is called only when somebody asks.
 
 ## Running on a microcontroller
 
-novo-lang lets a package state which of its modules can run on a device with no
-heap allocator, and the claim is checked by compiling a probe program for a
-Cortex-M4. A firmware image carries a settings table built at compile time: a
-radio channel, a sample interval, calibration constants. Asking
-`cfgvalue.field` for a key of a table baked into flash is the same question a
-server asks of a file, and it is integer and string arithmetic underneath.
+A firmware image carries a settings table built at compile time: a radio
+channel, a sample interval, calibration constants. An update received over the
+air is a second layer on top of it. Reading a setting is the same question a
+server asks of a file.
 
-`tests/embedded_probe.nv` is that program. It builds the tree from constants,
-walks one level of it, joins a path, and folds every answer into one number the
-device prints.
+novo-lang lets a package state which of its modules can run on a device, and
+the claim is checked by compiling a probe program for a Cortex-M4. Here the
+claim covers `cfgvalue`, `cfglayer`, `cfgmerge`, `cfglookup` and `cfgfault`.
+Their functions are `@tier(rt)`: the tree is made of lists and strings, so they
+need the device's heap, and they take nothing else from the host.
 
 ```bash
 novo build --target=nrf52-qemu tests/embedded_probe.nv
 ```
 
-The probe returns a boolean from every check rather than a `Result`. A
-`Result<T, E>` cannot be used on the device today, because the `Error` trait is
-absent from that target's prelude and no error type can implement it there.
-Every typed getter in `cfglookup` returns a `Result`, so the getters stay on
-the host until that changes. No signature here will change when it does.
+The probe merges a built-in layer with an update, reads two integers through
+the typed getters, checks that a cleared key reads as null, checks that a
+refusal names its layer, and prints `PASS: config-core-embedded` under QEMU's
+`mps2-an386` machine.
 
-`cfgenvkeys` is outside the claim, because a device has no environment to read.
-`cfgmerge.history_of` is outside it too, because a firmware with one table
-baked in has no history to walk.
+`cfgenvkeys` is outside the claim, because a device has no environment to
+read.
 
 ## What is not included
 
@@ -245,45 +242,30 @@ baked in has no history to walk.
 ## Tests
 
 ```bash
-novo test tests                          # every suite
-novo test tests/merge_tests.nv           # the value tree, the layers, the five rules
-novo test tests/lookup_tests.nv          # the path grammar and the typed getters
-novo test tests/envkeys_tests.nv         # the environment mapping, both directions
+novo test tests/merge_tests.nv     # the value tree, the layers, the five rules
+novo test tests/laws_tests.nv      # the same rules as properties over random trees
+novo test tests/lookup_tests.nv    # the path grammar and the typed getters
+novo test tests/envkeys_tests.nv   # the environment mapping, both directions
+novo test tests/edges_tests.nv     # every refusal, rendering and grammar edge
+bash tests/coverage.sh             # line coverage over src/, merged across suites
 ```
 
-`novo test` fails on purpose today. Every assertion reaches a `not implemented:
-config-core-nv.<module>.<fn>` panic, because every body is a `todo()`. Run it
-with `--isolate` for one verdict per test, naming the function it stopped at.
+There is no published test data for a configuration merge, so the suites
+assert the rules this page lists. `merge_tests.nv` writes each merge rule down
+as one case. `laws_tests.nv` checks the rules over a few hundred layers of
+random tables, lists, scalars and nulls from a fixed pseudo-random sequence:
+that the merged tree is the rules folded over the layers in order, that every
+leaf comes from the last layer that set its path, that a lower table's leaf
+survives unless the upper table holds its path or a prefix of it, that a list
+replaces whole, and that the empty table changes nothing. `lookup_tests.nv`
+asserts the shape of each refusal: that a wrong type is `CfgWrongType` and not
+`CfgMissing`, that a malformed path never reaches the tree, and that an explicit
+null is its own answer. `envkeys_tests.nv` asserts the mapping with nothing
+exported, which is possible because the mapping is a function over pairs.
 
-There is no published test data for a configuration merge, so the suite asserts
-the rules this page lists, one case per rule. `merge_tests.nv` writes the five
-merge rules down as executable claims. `lookup_tests.nv` asserts the shape of
-each refusal: that a wrong type is `CfgWrongType` and not `CfgMissing`, that a
-malformed path never reaches the tree, and that an explicit null is its own
-answer. `envkeys_tests.nv` asserts the mapping with nothing exported, which is
-possible because the mapping is a function over pairs.
-
-The behaviour the suite compares against is figment's and Rust's `config`'s for
-the layering and the getters, and dynaconf's for a settings object that can say
-where a value came from.
-
-## Implementation status
-
-| Item | Implemented |
-| --- | --- |
-| `cfgvalue.ConfigValue`, `.ConfigPair`, `.ConfigKind` | declared |
-| `cfgvalue`'s eighteen constructors and accessors, from `kind_of` to `scalar_text` | no |
-| `cfgfault.ConfigFault`, `.KeyPresence`, `impl Error for ConfigFault` | declared |
-| `cfgfault.fault_path`, `.fault_layer`, `.fault_kind`, `.presence_name`, `.presence_layer`, `.is_held` | no |
-| `cfglayer.ConfigLayer` | declared |
-| `cfglayer.layer`, `.renamed`, `.reranked`, `.in_order`, `.named`, `.top_rank` | no |
-| `cfgmerge.MergedConfig`, `.KeyOrigin` | declared |
-| `cfgmerge.merge_all`, `.root_of`, `.origins_of`, `.origin_of`, `.history_of`, `.refused_layers`, `.merge_values`, `.empty` | no |
-| `cfglookup.split`, `.path_of`, `.get_value`, `.presence` | no |
-| `cfglookup.get_str`, `.get_int`, `.get_float`, `.get_bool`, `.get_list`, `.get_str_list`, `.get_table` | no |
-| `cfglookup.leaf_paths`, `.value_at`, `.with_path` | no |
-| `cfgenvkeys.EnvKeyRule` | declared |
-| `cfgenvkeys.rule`, `.map_name`, `.name_for`, `.names_for`, `.layer_from`, `.skipped_names`, `.layer_from_paths`, `.bad_paths` | no |
+The behaviour the suites compare against is figment's and Rust's `config`'s
+for the layering and the getters, and dynaconf's for a settings object that can
+say where a value came from.
 
 ## Licence
 

@@ -5,6 +5,55 @@ All notable changes to config-core-nv are recorded here. The format is
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the pre-1.0 rule that a breaking change bumps the MINOR number.
 
+## 0.1.0 — 2026-09-27
+
+The first implementation of the interface published as 0.0.1: the
+value tree, layers, the five merge rules with a provenance record, the
+dotted-path getters, and the environment mapping in both directions.
+
+### Behaviour the interface left open
+
+- `cfgenvkeys.skipped_names` answers each skipped name paired with the
+  reason, one of `"no prefix"`, `"nothing after the prefix"` and
+  `"empty segment"`.  The interface's comment promised the reason; the
+  type is unchanged.
+- `cfgmerge.refused_layers` answers an origin with an empty path for
+  each layer whose root is not a table.  `cfgvalue.kind_of` on that
+  layer's root says what it was.
+- `cfgfault.fault_layer` answers `None` for the empty layer name that a
+  walk of a bare tree (`cfglookup.value_at`) records.
+- `cfgmerge.origin_of` has an entry for every path in the merged tree,
+  list elements included, naming the last layer to set anything at that
+  path.
+- A list index is the plain decimal spelling of an index in range;
+  `hosts.00` and `hosts.99999999999999999999` are missing.
+- `cfgvalue.infer_scalar` leaves a number out of range as text, and
+  accepts a leading `+`.  `cfgvalue.scalar_text` writes a float with a
+  point or an exponent, so `30.0` reads back as a float.
+- `cfglookup.with_path` writes into a list element when the segment is
+  an index in range, and otherwise replaces the list with a table.
+- `cfgenvkeys.name_for` answers `None` for a path that `map_name` would
+  not give back: an upper-case segment under a lowercasing rule, or a
+  segment that holds the separator or begins or ends with part of it.
+
+### Device build
+
+- Every module but `cfgenvkeys` is `@tier(rt)`, and
+  `tests/embedded_probe.nv` merges two layers and reads them through
+  the typed getters on a Cortex-M4 under QEMU.  A `Result` crosses the
+  device's function boundaries now, so the probe uses the getters the
+  interface release had to leave out.
+
+### Tests
+
+- `laws_tests.nv` checks the merge rules as properties over random
+  trees, and `edges_tests.nv` covers every refusal and rendering.
+  `tests/coverage.sh` reports the merged line coverage over `src/`.
+- `merge_tests.nv`'s ordering case listed two equal-rank layers in the
+  opposite order to the one it expected; it now lists them in the
+  order the rule keeps.
+- The toolchain floor is 0.12.0.
+
 ## 0.0.2 — 2026-09-15
 
 README rewritten to the package README style guide (docs/writing-a-readme.md); no change to the interface.
