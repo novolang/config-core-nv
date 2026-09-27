@@ -1,22 +1,26 @@
 // cfgfault.nv — why a lookup said no, and whether a key is there at
 // all.
 //
-// THE THREE QUESTIONS A REFUSAL ANSWERS, and they are three because
-// answering fewer sends the reader to the wrong file:
+// A refusal answers three questions:
 //
-//   what   — `missing`, `wrong type`, `walked through a scalar`
+//   what   — missing, wrong type, walked through a scalar, bad path,
+//            set to null
 //   where  — the dotted path, exactly as it was asked for
-//   whose  — the LAYER whose value the answer came from
+//   whose  — the layer whose value the answer came from
 //
-// The third is the one most configuration libraries drop, and it is
-// the one that matters: `database.port` being a string is almost never
-// a bug in the file the author is looking at, it is the environment
-// variable they forgot they exported.  Every arm that had a value to
-// look at carries the layer that supplied it.
+// The third is the one that sends a reader to the right file.
+// `database.port` being a string is rarely a mistake in the file the
+// author is looking at; it is usually an environment variable they
+// forgot they exported.  Every arm that had a value to look at carries
+// the layer that supplied it.
 //
-// NOTHING HERE IS FORMATTED TEXT.  A fault is a value with fields; a
-// program renders it in its own voice, and this package does not
-// decide that a reason appears on a console.
+// A fault is a value with fields.  `message` renders one line for a
+// program that has nothing better to say, and a program that wants its
+// own wording reads the fields.
+//
+// Every function here is `@tier(rt)`.
+
+use cfgvalue
 
 // Why a lookup refused.
 //
@@ -27,34 +31,36 @@
 //     println(cfgfault.fault_path(CfgMissing("server.port")))
 // ```
 pub enum ConfigFault
-    // No layer set this path.  The distinction from `CfgWasNull` is
-    // the package's reason for existing at this level of detail: a
-    // program that treats "unset" and "set to null" the same way
-    // cannot express a layer that CLEARS an inherited setting.
+    // No layer set this path.  A program that treated this the same
+    // as `CfgWasNull` could not let a layer clear an inherited
+    // setting.
     CfgMissing(path: Str)
     // A value is there and it is the wrong shape.  `wanted` is what
     // the getter asked for, `found` is what the merged tree holds, and
     // `layer` is the name of the layer that won the path.
     CfgWrongType(path: Str, wanted: ConfigKind, found: ConfigKind, layer: Str)
-    // The walk hit a non-table part way down: `server.port.timeout`
-    // where `server.port` is an integer.  `at` is the prefix that
-    // stopped it — `"server.port"` — so the message can point at the
-    // level that is wrong rather than the leaf that was asked for.
+    // The walk met a value it could not go into part way down:
+    // `server.port.timeout` where `server.port` is an integer.  `at` is
+    // the prefix that stopped it, `"server.port"`, so a message can
+    // point at the level that is wrong.  `found` is that value's kind
+    // and `layer` the layer that set it.
     CfgNotATable(path: Str, at: Str, found: ConfigKind, layer: Str)
-    // The path itself does not parse: an empty segment (`a..b`), a
-    // trailing dot, a dangling escape.  `why` names which.
+    // The path itself does not parse.  `why` is one of `"empty path"`,
+    // `"empty segment"`, `"dangling escape"` (a backslash at the end)
+    // and `"unknown escape"` (a backslash before anything but a dot or
+    // a backslash).
     CfgBadPath(path: Str, why: Str)
-    // The path is set, to null, by `layer`.  A getter that wanted a
-    // type refuses here rather than saying missing, because a caller
-    // deciding whether to fall back to a default needs to know that a
-    // layer said "no value" on purpose.
+    // The path is set to null by `layer`.  A getter refuses with this
+    // rather than `CfgMissing`, because a caller deciding whether to
+    // fall back to a default needs to know that a layer said "no
+    // value" on purpose.
     CfgWasNull(path: Str, layer: Str)
 
 // Whether a key is there, and how.
 //
-// The typed getters answer "give me an int"; this answers "is there
-// anything, and who put it there" — the question a caller asks before
-// deciding between a default and a refusal.
+// The typed getters answer "give me an int".  This answers "is there
+// anything, and who put it there", which is the question a caller asks
+// before choosing between a default and a refusal.
 //
 // ```novo
 // use cfgfault
@@ -70,17 +76,25 @@ pub enum KeyPresence
     // The winning layer set it to a value of this kind.
     KeyHeld(kind: ConfigKind, layer: Str)
 
-// The reason, as one line of text.
+// The reason, as one line of text: the path, then what is wrong, then
+// the layer when there is one.
 //
-// The `Error` trait's method, which is what `Result<_, ConfigFault>`
-// requires and what a `!` propagation renders when nothing catches it.
-// It is the LAST resort, not the interface: a program that wants to
-// point at the layer reads `fault_layer`, and one that wants to group
-// refusals reads `fault_kind`.
+// `Result<_, ConfigFault>` requires the `Error` trait (SPEC section
+// 3.4), and this is what a `!` propagation prints when nothing catches
+// it.  A program that wants to point at the layer reads `fault_layer`,
+// and one that groups refusals reads `fault_kind`.
 impl Error for ConfigFault
-    // Panics with `not implemented` until the bodies land.
+    // `server.port: wanted int, found str, set by APP_ environment`.
+    @tier(rt)
     fn message(self) -> Str
-        todo("config-core-nv.ConfigFault.message")
+        match self
+            CfgMissing(path)                         => "${path}: no layer sets it"
+            CfgWrongType(path, wanted, found, layer) =>
+                "${path}: wanted ${cfgvalue.kind_name(wanted)}, found ${cfgvalue.kind_name(found)}${blame(layer)}"
+            CfgNotATable(path, at, found, layer)     =>
+                "${path}: ${at} is ${cfgvalue.kind_name(found)}, which has no fields${blame(layer)}"
+            CfgBadPath(path, why)                    => "${path}: not a path: ${why}"
+            CfgWasNull(path, layer)                  => "${path}: set to null${blame(layer)}"
 
 // The path a fault is about, for every arm.
 //
@@ -90,13 +104,21 @@ impl Error for ConfigFault
 // fn main() [io]
 //     println(cfgfault.fault_path(CfgBadPath("a..b", "empty segment")))
 // ```
-pub fn fault_path(f: ConfigFault) -> Str
-    todo("config-core-nv.cfgfault.fault_path")
+pub @tier(rt)
+fn fault_path(f: ConfigFault) -> Str
+    match f
+        CfgMissing(path)            => path
+        CfgWrongType(path, _, _, _) => path
+        CfgNotATable(path, _, _, _) => path
+        CfgBadPath(path, _)         => path
+        CfgWasNull(path, _)         => path
 
 // The layer a fault blames, when it had one to blame.
 //
-// `None` for `CfgMissing` — no layer set the path, so no layer is at
-// fault — and for `CfgBadPath`, where the path never reached a layer.
+// `None` for `CfgMissing`, where no layer set the path, and for
+// `CfgBadPath`, where the path never reached a layer.  A fault from
+// `cfglookup.value_at`, which walks a tree with no layers, carries an
+// empty layer name, and that is `None` too.
 //
 // ```novo
 // use cfgfault
@@ -106,14 +128,19 @@ pub fn fault_path(f: ConfigFault) -> Str
 //         Some(l) => println(l)
 //         None    => println("nothing set it")
 // ```
-pub fn fault_layer(f: ConfigFault) -> ?Str
-    todo("config-core-nv.cfgfault.fault_layer")
+pub @tier(rt)
+fn fault_layer(f: ConfigFault) -> ?Str
+    match f
+        CfgWrongType(_, _, _, layer) => named(layer)
+        CfgNotATable(_, _, _, layer) => named(layer)
+        CfgWasNull(_, layer)         => named(layer)
+        _                            => None
 
 // A short name for which refusal this is, for a program that groups
 // or counts them.
 //
-// `"missing"`, `"wrong type"`, `"not a table"`, `"bad path"`,
-// `"was null"` — the five spellings, stable across releases.
+// The five names are `"missing"`, `"wrong type"`, `"not a table"`,
+// `"bad path"` and `"was null"`, stable across releases.
 //
 // ```novo
 // use cfgfault
@@ -121,8 +148,14 @@ pub fn fault_layer(f: ConfigFault) -> ?Str
 // fn main() [io]
 //     println(cfgfault.fault_kind(CfgMissing("a")))
 // ```
-pub fn fault_kind(f: ConfigFault) -> Str
-    todo("config-core-nv.cfgfault.fault_kind")
+pub @tier(rt)
+fn fault_kind(f: ConfigFault) -> Str
+    match f
+        CfgMissing(_)            => "missing"
+        CfgWrongType(_, _, _, _) => "wrong type"
+        CfgNotATable(_, _, _, _) => "not a table"
+        CfgBadPath(_, _)         => "bad path"
+        CfgWasNull(_, _)         => "was null"
 
 // The name of a presence answer: `"absent"`, `"null"`, `"held"`.
 //
@@ -132,8 +165,12 @@ pub fn fault_kind(f: ConfigFault) -> Str
 // fn main() [io]
 //     println(cfgfault.presence_name(KeyWasNull("environment")))
 // ```
-pub fn presence_name(p: KeyPresence) -> Str
-    todo("config-core-nv.cfgfault.presence_name")
+pub @tier(rt)
+fn presence_name(p: KeyPresence) -> Str
+    match p
+        KeyAbsent     => "absent"
+        KeyWasNull(_) => "null"
+        KeyHeld(_, _) => "held"
 
 // The layer behind a presence answer, when there is one.
 //
@@ -145,15 +182,18 @@ pub fn presence_name(p: KeyPresence) -> Str
 //         Some(l) => println(l)
 //         None    => println("nothing set it")
 // ```
-pub fn presence_layer(p: KeyPresence) -> ?Str
-    todo("config-core-nv.cfgfault.presence_layer")
+pub @tier(rt)
+fn presence_layer(p: KeyPresence) -> ?Str
+    match p
+        KeyAbsent         => None
+        KeyWasNull(layer) => Some(layer)
+        KeyHeld(_, layer) => Some(layer)
 
 // Whether a presence answer means there is a usable value: `KeyHeld`
 // only.
 //
 // `KeyWasNull` is false, because a layer that set null said there is
-// no value — and it is the arm that separates this from
-// `presence_name(p) != "absent"`.
+// no value.
 //
 // ```novo
 // use cfgfault
@@ -161,5 +201,23 @@ pub fn presence_layer(p: KeyPresence) -> ?Str
 // fn main() [io]
 //     println("${cfgfault.is_held(KeyWasNull("file"))}")
 // ```
-pub fn is_held(p: KeyPresence) -> Bool
-    todo("config-core-nv.cfgfault.is_held")
+pub @tier(rt)
+fn is_held(p: KeyPresence) -> Bool
+    match p
+        KeyHeld(_, _) => true
+        _             => false
+
+// A layer name as an optional: `None` for the empty name a bare-tree
+// walk records.
+@tier(rt)
+fn named(layer: Str) -> ?Str
+    if layer == ""
+        return None
+    Some(layer)
+
+// `, set by <layer>` for a message, or nothing when there is no layer.
+@tier(rt)
+fn blame(layer: Str) -> Str
+    if layer == ""
+        return ""
+    ", set by ${layer}"

@@ -1,33 +1,33 @@
 // cfgvalue.nv — the one tree every layer is expressed in, and the
 // rule for turning a string into a typed value.
 //
-// WHY THERE IS A TREE OF ITS OWN RATHER THAN toml-nv's OR yaml-nv's.
-// A merge has to compare two values that came from different formats:
-// the file said `port = 8080` in TOML and the environment said
-// `APP_PORT=8080` as text, and "later layer wins" has no answer unless
-// both are the same kind of thing first.  One tree makes the merge
-// total; three trees and a pairwise comparison make it a matrix.
+// A merge has to compare two values that came from different formats.
+// A file said `port = 8080` in TOML and the environment said
+// `APP_PORT=8080` as text, and "the later layer wins" has an answer
+// only when both are the same kind of thing.  One tree makes the merge
+// a function of two values; a tree per format would make it a matrix.
 //
-// The adapters that turn a `TomlValue`, a yaml-nv document or a
-// `std.json` value into this tree live in `config-nv`, not here.  That
-// package depends on the two parsers anyway; this one would acquire
-// them — and calendar-nv behind toml-nv — to carry three functions
-// nothing in the merge calls.  The README argues it at length.
+// The adapters that turn a TOML, YAML or JSON document into this tree
+// live in config-nv, which depends on those parsers anyway.
 //
-// WHAT IS DELIBERATELY NOT AN ARM.  There is no date and no time.
-// TOML has both and this tree drops them to `CfgStr` in RFC 3339
-// spelling, because a configuration merge never compares two instants
-// and a `core` package that carried a civil date would carry
-// calendar-nv with it.  A program that wants the date parses the
+// There is no date and no time arm.  TOML has both, and this tree holds
+// them as `CfgStr` in RFC 3339 spelling.  A configuration merge never
+// compares two instants, and a program that wants the date parses the
 // string it gets back.
+//
+// Every function here is `@tier(rt)`: it allocates, and it runs on a
+// device with a heap.
+
+use std.str
+use std.math
 
 // A configuration value, after parsing and before merging.
 //
-// Seven arms, and the last one is the interesting one: `CfgNull` is a
-// value a layer SET, distinct from a key no layer mentioned.  YAML
-// writes it `a:`, TOML cannot write it at all, JSON writes it `null`,
-// and a program clearing an inherited setting needs the difference —
-// `cfgfault.KeyPresence` is where a caller asks for it.
+// There are seven arms.  `CfgNull` is a value a layer set, which is
+// not the same as a key no layer mentioned.  YAML writes it `a:`, JSON
+// writes it `null`, and TOML cannot write it.  A program clearing an
+// inherited setting needs the difference, and `cfgfault.KeyPresence`
+// is where a caller asks for it.
 //
 // ```novo
 // use cfgvalue
@@ -37,13 +37,12 @@
 //     println(cfgvalue.kind_name(cfgvalue.kind_of(v)))
 // ```
 pub enum ConfigValue
-    // A table: its pairs in the order the layer wrote them.  Order is
-    // kept because a merged table renders back out in a stable order,
-    // and a caller diffing two rendered configurations should not see
-    // a change nobody made.
+    // A table: its pairs in the order the layer wrote them.  The order
+    // is kept, so a merged table renders back out the same way every
+    // time.
     CfgTable(pairs: [ConfigPair])
-    // A list.  Lists REPLACE rather than merge — see `cfgmerge` — so
-    // nothing here needs to know how two lists would combine.
+    // A list.  A later list replaces an earlier one whole (see
+    // `cfgmerge`).
     CfgList(items: [ConfigValue])
     // A string, already unescaped by whatever parsed it.
     CfgStr(value: Str)
@@ -53,29 +52,27 @@ pub enum ConfigValue
     CfgFloat(value: Float)
     // `true` or `false`.
     CfgBool(value: Bool)
-    // The null value: a key a layer explicitly set to nothing.  NOT
-    // the absence of a key, which is no arm at all.
+    // The null value: a key a layer set to nothing.  The absence of a
+    // key is no arm at all.
     CfgNull
 
 // One key and its value, in the order the layer wrote them.
 //
-// The key is a `Str` and not a `ConfigValue`: YAML permits a
-// collection as a mapping key and this tree does not, because a
-// dotted path cannot name one and a configuration file that used one
-// would have no way to be looked up.  `config-nv`'s YAML adapter
-// refuses such a document rather than flattening it.
+// The key is a `Str`.  YAML permits a collection as a mapping key, and
+// this tree does not, because a dotted path cannot name one.
+// config-nv's YAML adapter refuses such a document.
 pub struct ConfigPair
     // The key as the layer spelled it.  Lookup is case-sensitive; the
-    // environment mapping in `cfgenvkeys` is what lowercases.
+    // environment mapping in `cfgenvkeys` is the one place that
+    // lowercases.
     key: Str
     // The value bound to it.
     value: ConfigValue
 
 // Which arm a value is, as a value in its own right.
 //
-// This exists so a refusal can say "wanted an int, found a string"
-// without carrying the string — a reason a caller can match on, log or
-// render, rather than a sentence somebody already formatted.
+// A refusal says "wanted an int, found a string" with two of these,
+// which a caller can match on, log or render in its own words.
 //
 // ```novo
 // use cfgvalue
@@ -101,14 +98,22 @@ pub enum ConfigKind
 //     let k = cfgvalue.kind_of(cfgvalue.str_value("hello"))
 //     println(cfgvalue.kind_name(k))
 // ```
-pub fn kind_of(v: ConfigValue) -> ConfigKind
-    todo("config-core-nv.cfgvalue.kind_of")
+pub @tier(rt)
+fn kind_of(v: ConfigValue) -> ConfigKind
+    match v
+        CfgTable(_) => KindTable
+        CfgList(_)  => KindList
+        CfgStr(_)   => KindStr
+        CfgInt(_)   => KindInt
+        CfgFloat(_) => KindFloat
+        CfgBool(_)  => KindBool
+        CfgNull     => KindNull
 
 // The kind's name, in the spelling a refusal uses.
 //
-// `"table"`, `"list"`, `"str"`, `"int"`, `"float"`, `"bool"`, `"null"`
-// — lower case, no punctuation, stable across releases because a
-// program's own error text quotes them.
+// The names are `"table"`, `"list"`, `"str"`, `"int"`, `"float"`,
+// `"bool"` and `"null"`: lower case, with no punctuation, and stable
+// across releases, because a program's own error text may quote them.
 //
 // ```novo
 // use cfgvalue
@@ -116,14 +121,23 @@ pub fn kind_of(v: ConfigValue) -> ConfigKind
 // fn main() [io]
 //     println(cfgvalue.kind_name(KindFloat))
 // ```
-pub fn kind_name(k: ConfigKind) -> Str
-    todo("config-core-nv.cfgvalue.kind_name")
+pub @tier(rt)
+fn kind_name(k: ConfigKind) -> Str
+    match k
+        KindTable => "table"
+        KindList  => "list"
+        KindStr   => "str"
+        KindInt   => "int"
+        KindFloat => "float"
+        KindBool  => "bool"
+        KindNull  => "null"
 
 // A table from its pairs, in order.
 //
-// Duplicate keys are the caller's to avoid: this constructor does not
-// deduplicate, because which of two same-named pairs a FORMAT means is
-// the format's rule and not this package's.  A lookup finds the first.
+// Duplicate keys are the caller's to avoid.  This constructor does not
+// deduplicate, because which of two same-named pairs a format means is
+// the format's rule.  A lookup finds the first.  The table holds its
+// own copy of the list.
 //
 // ```novo
 // use cfgvalue
@@ -132,10 +146,11 @@ pub fn kind_name(k: ConfigKind) -> Str
 //     let t = cfgvalue.table([cfgvalue.pair("port", cfgvalue.int_value(80))])
 //     println(cfgvalue.kind_name(cfgvalue.kind_of(t)))
 // ```
-pub fn table(pairs: [ConfigPair]) -> ConfigValue
-    todo("config-core-nv.cfgvalue.table")
+pub @tier(rt)
+fn table(pairs: [ConfigPair]) -> ConfigValue
+    CfgTable(pairs[:])
 
-// The empty table — the root of a layer that contributed nothing, and
+// The empty table: the root of a layer that contributes nothing, and
 // the identity of the merge.
 //
 // ```novo
@@ -144,8 +159,10 @@ pub fn table(pairs: [ConfigPair]) -> ConfigValue
 // fn main() [io]
 //     println("${cfgvalue.len_of(cfgvalue.empty_table())}")
 // ```
-pub fn empty_table() -> ConfigValue
-    todo("config-core-nv.cfgvalue.empty_table")
+pub @tier(rt)
+fn empty_table() -> ConfigValue
+    let none: [ConfigPair] = []
+    CfgTable(none)
 
 // One pair.
 //
@@ -156,10 +173,11 @@ pub fn empty_table() -> ConfigValue
 //     let p = cfgvalue.pair("host", cfgvalue.str_value("localhost"))
 //     println(p.key)
 // ```
-pub fn pair(key: Str, value: ConfigValue) -> ConfigPair
-    todo("config-core-nv.cfgvalue.pair")
+pub @tier(rt)
+fn pair(key: Str, value: ConfigValue) -> ConfigPair
+    ConfigPair { key: key, value: value }
 
-// A list from its items.
+// A list from its items.  The value holds its own copy of the list.
 //
 // ```novo
 // use cfgvalue
@@ -168,12 +186,12 @@ pub fn pair(key: Str, value: ConfigValue) -> ConfigPair
 //     let xs = cfgvalue.list_of([cfgvalue.int_value(1), cfgvalue.int_value(2)])
 //     println("${cfgvalue.len_of(xs)}")
 // ```
-pub fn list_of(items: [ConfigValue]) -> ConfigValue
-    todo("config-core-nv.cfgvalue.list_of")
+pub @tier(rt)
+fn list_of(items: [ConfigValue]) -> ConfigValue
+    CfgList(items[:])
 
-// A string value.  Named `str_value` rather than `str` because `str`
-// is a standard library module and a function shadowing it would make
-// every other call in the file ambiguous to a reader.
+// A string value.  It is named `str_value` rather than `str` because
+// `str` is a standard library module.
 //
 // ```novo
 // use cfgvalue
@@ -181,8 +199,9 @@ pub fn list_of(items: [ConfigValue]) -> ConfigValue
 // fn main() [io]
 //     println(cfgvalue.kind_name(cfgvalue.kind_of(cfgvalue.str_value("x"))))
 // ```
-pub fn str_value(s: Str) -> ConfigValue
-    todo("config-core-nv.cfgvalue.str_value")
+pub @tier(rt)
+fn str_value(s: Str) -> ConfigValue
+    CfgStr(s)
 
 // An integer value.
 //
@@ -192,8 +211,9 @@ pub fn str_value(s: Str) -> ConfigValue
 // fn main() [io]
 //     println(cfgvalue.kind_name(cfgvalue.kind_of(cfgvalue.int_value(1))))
 // ```
-pub fn int_value(n: Int) -> ConfigValue
-    todo("config-core-nv.cfgvalue.int_value")
+pub @tier(rt)
+fn int_value(n: Int) -> ConfigValue
+    CfgInt(n)
 
 // A float value.
 //
@@ -203,8 +223,9 @@ pub fn int_value(n: Int) -> ConfigValue
 // fn main() [io]
 //     println(cfgvalue.kind_name(cfgvalue.kind_of(cfgvalue.float_value(1.5))))
 // ```
-pub fn float_value(f: Float) -> ConfigValue
-    todo("config-core-nv.cfgvalue.float_value")
+pub @tier(rt)
+fn float_value(f: Float) -> ConfigValue
+    CfgFloat(f)
 
 // A boolean value.
 //
@@ -214,8 +235,9 @@ pub fn float_value(f: Float) -> ConfigValue
 // fn main() [io]
 //     println(cfgvalue.kind_name(cfgvalue.kind_of(cfgvalue.bool_value(true))))
 // ```
-pub fn bool_value(b: Bool) -> ConfigValue
-    todo("config-core-nv.cfgvalue.bool_value")
+pub @tier(rt)
+fn bool_value(b: Bool) -> ConfigValue
+    CfgBool(b)
 
 // The null value.
 //
@@ -225,8 +247,9 @@ pub fn bool_value(b: Bool) -> ConfigValue
 // fn main() [io]
 //     println(cfgvalue.kind_name(cfgvalue.kind_of(cfgvalue.null_value())))
 // ```
-pub fn null_value() -> ConfigValue
-    todo("config-core-nv.cfgvalue.null_value")
+pub @tier(rt)
+fn null_value() -> ConfigValue
+    CfgNull
 
 // One level of a table, by key.
 //
@@ -243,8 +266,15 @@ pub fn null_value() -> ConfigValue
 //         Some(_) => println("found")
 //         None    => println("absent")
 // ```
-pub fn field(v: ConfigValue, key: Str) -> ?ConfigValue
-    todo("config-core-nv.cfgvalue.field")
+pub @tier(rt)
+fn field(v: ConfigValue, key: Str) -> ?ConfigValue
+    match v
+        CfgTable(pairs) =>
+            let at = index_of_key(pairs, key)
+            if at < 0
+                return None
+            Some(pairs[at].value)
+        _               => None
 
 // The keys of a table, in order.  `[]` for anything else.
 //
@@ -256,13 +286,16 @@ pub fn field(v: ConfigValue, key: Str) -> ?ConfigValue
 //     let t = cfgvalue.table([cfgvalue.pair("a", cfgvalue.null_value())])
 //     println("${list.len(cfgvalue.keys_of(t))}")
 // ```
-pub fn keys_of(v: ConfigValue) -> [Str]
-    todo("config-core-nv.cfgvalue.keys_of")
+pub @tier(rt)
+fn keys_of(v: ConfigValue) -> [Str]
+    var out: [Str] = []
+    if let CfgTable(pairs) = v
+        for p in pairs
+            list.push(out, p.key)
+    out
 
 // How many pairs a table has, or how many items a list has.  `0` for
-// every scalar, `CfgNull` included — a scalar has no length, and
-// returning `?Int` would put an unwrap in front of every caller that
-// only wanted to know whether a table was empty.
+// every scalar, `CfgNull` included.
 //
 // ```novo
 // use cfgvalue
@@ -270,8 +303,12 @@ pub fn keys_of(v: ConfigValue) -> [Str]
 // fn main() [io]
 //     println("${cfgvalue.len_of(cfgvalue.int_value(7))}")
 // ```
-pub fn len_of(v: ConfigValue) -> Int
-    todo("config-core-nv.cfgvalue.len_of")
+pub @tier(rt)
+fn len_of(v: ConfigValue) -> Int
+    match v
+        CfgTable(pairs) => list.len(pairs)
+        CfgList(items)  => list.len(items)
+        _               => 0
 
 // Whether the value is a table.
 //
@@ -281,13 +318,16 @@ pub fn len_of(v: ConfigValue) -> Int
 // fn main() [io]
 //     println("${cfgvalue.is_table(cfgvalue.empty_table())}")
 // ```
-pub fn is_table(v: ConfigValue) -> Bool
-    todo("config-core-nv.cfgvalue.is_table")
+pub @tier(rt)
+fn is_table(v: ConfigValue) -> Bool
+    match v
+        CfgTable(_) => true
+        _           => false
 
 // Whether the value is the null value.
 //
-// This is the arm, not "is it missing" — a key nothing set never
-// reaches a `ConfigValue` at all.
+// This asks about the arm.  A key nothing set never reaches a
+// `ConfigValue` at all.
 //
 // ```novo
 // use cfgvalue
@@ -295,28 +335,30 @@ pub fn is_table(v: ConfigValue) -> Bool
 // fn main() [io]
 //     println("${cfgvalue.is_null(cfgvalue.null_value())}")
 // ```
-pub fn is_null(v: ConfigValue) -> Bool
-    todo("config-core-nv.cfgvalue.is_null")
+pub @tier(rt)
+fn is_null(v: ConfigValue) -> Bool
+    match v
+        CfgNull => true
+        _       => false
 
 // The one place a string becomes a typed value, and the only coercion
 // in the package.
 //
-// `"true"` and `"false"` are `CfgBool`; a decimal integer that fits 64
-// bits is `CfgInt`; a decimal with a point or an exponent is
-// `CfgFloat`; `"null"` is `CfgNull`; everything else, the empty string
-// included, is `CfgStr` with the text unchanged.
+// - `"true"` and `"false"` are `CfgBool`.
+// - An optional `+` or `-` followed by one or more decimal digits is
+//   `CfgInt` when it fits in 64 bits, and `CfgStr` when it does not.
+// - An optional sign, digits with a decimal point or an exponent
+//   (`1.5`, `.5`, `2.`, `1e3`, `6.02E+23`), and at least one digit
+//   before the exponent, is `CfgFloat` when it is in the range of a
+//   64-bit float, and `CfgStr` when it is not (`1e999`).
+// - `"null"` is `CfgNull`.
+// - Everything else, the empty string and `"True"` included, is
+//   `CfgStr` with the text unchanged.
 //
-// It is here rather than in `cfgenvkeys` because two callers need the
-// same rule: the environment layer, whose values are always text, and
-// `config-nv`'s command-line overrides, whose values are always text
-// too.  Two spellings of one rule is how `--port=8080` and
-// `APP_PORT=8080` end up different types.
-//
-// **The typed getters do not coerce.**  `get_int` on a `CfgStr` is
-// `CfgWrongType`, not a parse.  A getter that accepted `"8080"` could
-// not tell a caller which layer's spelling it had accepted, and the
-// reason a refusal names its layer is that a configuration bug is
-// almost always "the wrong layer won".
+// Two callers need the same rule: the environment layer and
+// config-nv's command-line overrides, whose values are both text.  The
+// typed getters in `cfglookup` do not coerce, so `get_int` on a
+// `CfgStr` is a refusal that names the layer, not a parse.
 //
 // ```novo
 // use cfgvalue
@@ -325,15 +367,30 @@ pub fn is_null(v: ConfigValue) -> Bool
 //     println(cfgvalue.kind_name(cfgvalue.kind_of(cfgvalue.infer_scalar("8080"))))
 //     println(cfgvalue.kind_name(cfgvalue.kind_of(cfgvalue.infer_scalar("8080a"))))
 // ```
-pub fn infer_scalar(text: Str) -> ConfigValue
-    todo("config-core-nv.cfgvalue.infer_scalar")
+pub @tier(rt)
+fn infer_scalar(text: Str) -> ConfigValue
+    if text == "true"
+        return CfgBool(true)
+    if text == "false"
+        return CfgBool(false)
+    if text == "null"
+        return CfgNull
+    if is_integer_text(text)
+        if let Some(n) = integer_value(text)
+            return CfgInt(n)
+        return CfgStr(text)
+    if is_float_text(text)
+        if let Some(f) = str.to_float(text)
+            return CfgFloat(f)
+    CfgStr(text)
 
-// `infer_scalar`'s opposite: a scalar rendered as the text a layer
-// would have written.
+// `infer_scalar`'s opposite: a scalar written as the text a layer
+// would have held.
 //
-// `CfgStr` gives its own text, unquoted.  `CfgTable` and `CfgList`
-// give `None` — there is no one spelling of a table that every format
-// agrees on, and a package that picked one would be a serialiser.
+// `CfgStr` gives its own text, unquoted.  A float always carries a
+// point or an exponent, so `infer_scalar` reads it back as a float:
+// 30.0 is written `30.0`.  `CfgTable` and `CfgList` give `None`,
+// because no one spelling of a table is common to every format.
 //
 // ```novo
 // use cfgvalue
@@ -343,5 +400,112 @@ pub fn infer_scalar(text: Str) -> ConfigValue
 //         Some(t) => println(t)
 //         None    => println("not a scalar")
 // ```
-pub fn scalar_text(v: ConfigValue) -> ?Str
-    todo("config-core-nv.cfgvalue.scalar_text")
+pub @tier(rt)
+fn scalar_text(v: ConfigValue) -> ?Str
+    match v
+        CfgStr(s)   => Some(s)
+        CfgInt(n)   => Some(str.from_int(n))
+        CfgFloat(f) => Some(float_text(f))
+        CfgBool(b)  => Some(str.from_bool(b))
+        CfgNull     => Some("null")
+        _           => None
+
+// Whether `text` is an optional sign and one or more decimal digits.
+@tier(rt)
+fn is_integer_text(text: Str) -> Bool
+    let n = str.len(text)
+    var i = 0
+    if n > 0 and is_sign(str.byte_at_or(text, 0, 0))
+        i = 1
+    if i == n
+        return false
+    for k in i..n
+        if not is_digit(str.byte_at_or(text, k, 0))
+            return false
+    true
+
+// The value of text `is_integer_text` accepted, or `None` when it does
+// not fit in 64 bits.  A negative number is accumulated downward, so
+// the most negative `Int` fits too.
+@tier(rt)
+fn integer_value(text: Str) -> ?Int
+    let n = str.len(text)
+    let first = str.byte_at_or(text, 0, 0)
+    let negative = first == '-'
+    var start = 0
+    if is_sign(first)
+        start = 1
+    let low = math.min_int()
+    let high = math.max_int()
+    var v = 0
+    for k in start..n
+        let d = str.byte_at_or(text, k, 0) - '0'
+        if negative
+            if v < (low + d) / 10
+                return None
+            v = v * 10 - d
+        else
+            if v > (high - d) / 10
+                return None
+            v = v * 10 + d
+    Some(v)
+
+// Whether `text` is a decimal float: an optional sign, digits with a
+// point or an exponent, at least one digit before any exponent, and
+// at least one digit in the exponent.
+@tier(rt)
+fn is_float_text(text: Str) -> Bool
+    let n = str.len(text)
+    var i = 0
+    if n > 0 and is_sign(str.byte_at_or(text, 0, 0))
+        i = 1
+    var digits = 0
+    var point = false
+    var exponent = false
+    var exp_digits = 0
+    for k in i..n
+        let b = str.byte_at_or(text, k, 0)
+        if is_digit(b)
+            if exponent
+                exp_digits = exp_digits + 1
+            else
+                digits = digits + 1
+        else if b == '.' and not point and not exponent
+            point = true
+        else if (b == 'e' or b == 'E') and not exponent and digits > 0
+            exponent = true
+        else if is_sign(b) and exponent and exp_digits == 0 and is_exponent_mark(str.byte_at_or(text, k - 1, 0))
+            exp_digits = 0
+        else
+            return false
+    digits > 0 and (point or exponent) and (not exponent or exp_digits > 0)
+
+@tier(rt)
+fn is_digit(b: Int) -> Bool
+    b >= '0' and b <= '9'
+
+@tier(rt)
+fn is_sign(b: Int) -> Bool
+    b == '+' or b == '-'
+
+@tier(rt)
+fn is_exponent_mark(b: Int) -> Bool
+    b == 'e' or b == 'E'
+
+// A float's text with a point or an exponent in it, so it reads back
+// as a float.  The shortest round-trip form of a whole number has
+// neither, and gets `.0`.
+@tier(rt)
+fn float_text(f: Float) -> Str
+    let t = str.from_float(f)
+    if str.contains(t, ".") or str.contains(t, "e") or str.contains(t, "n")
+        return t
+    t + ".0"
+
+// The index of the first pair with this key, or -1.
+@tier(rt)
+fn index_of_key(pairs: [ConfigPair], key: Str) -> Int
+    for i in 0..list.len(pairs)
+        if pairs[i].key == key
+            return i
+    0 - 1
