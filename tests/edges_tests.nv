@@ -1,0 +1,274 @@
+// edges_tests.nv — every refusal, every rendering and every edge of the
+// grammar, one case each.
+//
+// The other suites follow the README's rules.  This one covers the
+// answers a rule does not mention: each arm of a fault as a message,
+// each typed getter refusing each other kind, the two escape errors,
+// the numbers `infer_scalar` must leave as text, and the environment
+// names `map_name` must not map.
+
+use std.test
+use std.list
+use std.math
+use cfgvalue
+use cfgfault
+use cfglayer
+use cfgmerge
+use cfglookup
+use cfgenvkeys
+
+fn sample() -> MergedConfig
+    cfgmerge.merge_all([
+        cfglayer.layer("defaults", 0, cfgvalue.table([
+            cfgvalue.pair("port", cfgvalue.int_value(80)),
+            cfgvalue.pair("ratio", cfgvalue.float_value(0.5)),
+            cfgvalue.pair("name", cfgvalue.str_value("svc")),
+            cfgvalue.pair("hosts", cfgvalue.list_of([cfgvalue.str_value("a")])),
+            cfgvalue.pair("flags", cfgvalue.list_of([
+                cfgvalue.str_value("x"), cfgvalue.str_value("y"), cfgvalue.str_value("z")])),
+            cfgvalue.pair("log", cfgvalue.table([cfgvalue.pair("level", cfgvalue.str_value("info"))]))])),
+        cfglayer.layer("file", 10, cfgvalue.table([
+            cfgvalue.pair("flags", cfgvalue.list_of([cfgvalue.str_value("q")])),
+            cfgvalue.pair("proxy", cfgvalue.null_value())]))])
+
+@test
+fn test_every_fault_renders_as_one_line() [io]
+    test.case("missing names the path and nobody")
+    test.assert(CfgMissing("a.b").message() == "a.b: no layer sets it")
+
+    test.case("wrong type names what was wanted, what was found and who set it")
+    test.assert(CfgWrongType("port", KindInt, KindStr, "env").message() == "port: wanted int, found str, set by env")
+
+    test.case("not a table names the level that stopped the walk")
+    test.assert(CfgNotATable("a.b.c", "a.b", KindInt, "file").message() == "a.b.c: a.b is int, which has no fields, set by file")
+
+    test.case("a bad path says why")
+    test.assert(CfgBadPath("a..b", "empty segment").message() == "a..b: not a path: empty segment")
+
+    test.case("null names the layer that cleared it, and a bare tree names none")
+    test.assert(CfgWasNull("proxy", "env").message() == "proxy: set to null, set by env")
+    test.assert(CfgWasNull("proxy", "").message() == "proxy: set to null")
+
+    test.case("every arm has a path")
+    test.assert(cfgfault.fault_path(CfgMissing("m")) == "m")
+    test.assert(cfgfault.fault_path(CfgWrongType("w", KindInt, KindStr, "l")) == "w")
+    test.assert(cfgfault.fault_path(CfgNotATable("n", "", KindInt, "l")) == "n")
+    test.assert(cfgfault.fault_path(CfgBadPath("b", "empty path")) == "b")
+    test.assert(cfgfault.fault_path(CfgWasNull("z", "l")) == "z")
+
+    test.case("and the arms that saw a value blame its layer")
+    test.assert(cfgfault.fault_layer(CfgNotATable("n", "", KindInt, "file")) == Some("file"))
+    test.assert(cfgfault.fault_layer(CfgWasNull("z", "env")) == Some("env"))
+    test.assert(cfgfault.fault_layer(CfgWrongType("w", KindInt, KindStr, "")) == None)
+    test.assert(cfgfault.fault_kind(CfgNotATable("n", "", KindInt, "file")) == "not a table")
+
+@test
+fn test_every_presence_answer() [io]
+    let m = sample()
+
+    test.case("a held value names its kind's answer and its layer")
+    test.assert(cfgfault.presence_name(cfglookup.presence(m, "port")) == "held")
+    test.assert(cfgfault.presence_layer(cfglookup.presence(m, "port")) == Some("defaults"))
+
+    test.case("an absent one has no layer")
+    test.assert(cfgfault.presence_layer(cfglookup.presence(m, "nothing")) == None)
+
+    test.case("a path that walks through a scalar is absent too")
+    test.assert(cfgfault.presence_name(cfglookup.presence(m, "port.deeper")) == "absent")
+
+@test
+fn test_every_getter_refuses_every_other_kind() [io]
+    let m = sample()
+
+    test.case("get_str on an int")
+    match cfglookup.get_str(m, "port")
+        Ok(_)  => test.fail("port is an int")
+        Err(e) => test.assert(e == CfgWrongType("port", KindStr, KindInt, "defaults"))
+
+    test.case("get_float on a float, and on a string")
+    test.assert(cfglookup.get_float(m, "ratio") == Ok(0.5))
+    match cfglookup.get_float(m, "name")
+        Ok(_)  => test.fail("name is a string")
+        Err(e) => test.assert(cfgfault.fault_kind(e) == "wrong type")
+
+    test.case("get_bool on a string")
+    match cfglookup.get_bool(m, "name")
+        Ok(_)  => test.fail("name is a string")
+        Err(e) => test.assert(cfgfault.fault_kind(e) == "wrong type")
+
+    test.case("get_list on a table, and get_table on a list")
+    match cfglookup.get_list(m, "log")
+        Ok(_)  => test.fail("log is a table")
+        Err(e) => test.assert(cfgfault.fault_kind(e) == "wrong type")
+    match cfglookup.get_table(m, "hosts")
+        Ok(_)  => test.fail("hosts is a list")
+        Err(e) => test.assert(e == CfgWrongType("hosts", KindTable, KindList, "defaults"))
+
+    test.case("get_str_list refuses a value that is not a list at all")
+    match cfglookup.get_str_list(m, "name")
+        Ok(_)  => test.fail("name is a string")
+        Err(e) => test.assert(cfgfault.fault_kind(e) == "wrong type")
+
+    test.case("and a later layer's list replaced the earlier one whole")
+    test.assert(cfglookup.get_str_list(m, "flags") == Ok(["q"]))
+
+@test
+fn test_the_walk_through_a_list() [io]
+    let m = sample()
+
+    test.case("a word against a list is not an index")
+    match cfglookup.get_value(m, "hosts.first")
+        Ok(_)  => test.fail("a list has no keys")
+        Err(e) => test.assert(e == CfgNotATable("hosts.first", "hosts", KindList, "defaults"))
+
+    test.case("an index too large for an Int is missing")
+    match cfglookup.get_value(m, "hosts.99999999999999999999")
+        Ok(_)  => test.fail("no list is that long")
+        Err(e) => test.assert(cfgfault.fault_kind(e) == "missing")
+
+    test.case("a bare tree's refusal names no layer")
+    match cfglookup.value_at(cfgvalue.table([cfgvalue.pair("a", cfgvalue.int_value(1))]), "a.b")
+        Ok(_)  => test.fail("an int has no fields")
+        Err(e) => test.assert(cfgfault.fault_layer(e) == None)
+
+@test
+fn test_the_two_escape_errors() [io]
+    test.case("a backslash at the end")
+    test.assert(cfglookup.split("a\\") == Err(CfgBadPath("a\\", "dangling escape")))
+
+    test.case("a backslash before anything but a dot or a backslash")
+    test.assert(cfglookup.split("a\\b") == Err(CfgBadPath("a\\b", "unknown escape")))
+
+    test.case("and the two escapes it does know")
+    test.assert(cfglookup.split("a\\.b\\\\c.d") == Ok(["a.b\\c", "d"]))
+    test.assert(cfglookup.path_of(["a.b\\c", "d"]) == "a\\.b\\\\c.d")
+
+@test
+fn test_with_path_through_lists_and_scalars() [io]
+    let t = cfgvalue.table([cfgvalue.pair("hosts", cfgvalue.list_of([
+        cfgvalue.table([cfgvalue.pair("name", cfgvalue.str_value("a"))])]))])
+
+    test.case("an index in range writes into that element")
+    match cfglookup.with_path(t, "hosts.0.port", cfgvalue.int_value(22))
+        Ok(u)  =>
+            test.assert(cfglookup.value_at(u, "hosts.0.port") == Ok(cfgvalue.int_value(22)))
+            test.assert(cfglookup.value_at(u, "hosts.0.name") == Ok(cfgvalue.str_value("a")))
+        Err(_) => test.fail("that path is well formed")
+
+    test.case("an index out of range replaces the list with a table")
+    match cfglookup.with_path(t, "hosts.5", cfgvalue.int_value(1))
+        Ok(u)  => test.assert(cfglookup.value_at(u, "hosts.5") == Ok(cfgvalue.int_value(1)))
+        Err(_) => test.fail("that path is well formed")
+
+    test.case("a word against a list does too")
+    match cfglookup.with_path(t, "hosts.main", cfgvalue.int_value(1))
+        Ok(u)  => test.assert(cfgvalue.is_table(cfgvalue.field(u, "hosts") ?? cfgvalue.null_value()))
+        Err(_) => test.fail("that path is well formed")
+
+    test.case("a root that is not a table becomes one")
+    match cfglookup.with_path(cfgvalue.int_value(3), "a", cfgvalue.int_value(1))
+        Ok(u)  => test.assert(cfgvalue.len_of(u) == 1)
+        Err(_) => test.fail("that path is well formed")
+
+    test.case("and a bad path is refused")
+    match cfglookup.with_path(t, "a..b", cfgvalue.int_value(1))
+        Ok(_)  => test.fail("an empty segment names nothing")
+        Err(e) => test.assert(cfgfault.fault_kind(e) == "bad path")
+
+@test
+fn test_infer_scalar_at_its_edges() [io]
+    test.case("false, signs and exponents")
+    test.assert(cfgvalue.infer_scalar("false") == cfgvalue.bool_value(false))
+    test.assert(cfgvalue.infer_scalar("+5") == cfgvalue.int_value(5))
+    test.assert(cfgvalue.infer_scalar("-1.5e-3") == cfgvalue.float_value(0.0 - 0.0015))
+    test.assert(cfgvalue.infer_scalar("6.02E+23") == cfgvalue.float_value(6.02e23))
+    test.assert(cfgvalue.infer_scalar("1e5") == cfgvalue.float_value(100000.0))
+    test.assert(cfgvalue.infer_scalar(".5") == cfgvalue.float_value(0.5))
+
+    test.case("numbers out of range stay text, and the ends of the range do not")
+    test.assert(cfgvalue.infer_scalar("99999999999999999999") == cfgvalue.str_value("99999999999999999999"))
+    test.assert(cfgvalue.infer_scalar("-99999999999999999999") == cfgvalue.str_value("-99999999999999999999"))
+    test.assert(cfgvalue.infer_scalar("9223372036854775807") == cfgvalue.int_value(math.max_int()))
+    test.assert(cfgvalue.infer_scalar("9223372036854775808") == cfgvalue.str_value("9223372036854775808"))
+    test.assert(cfgvalue.infer_scalar("-12") == cfgvalue.int_value(0 - 12))
+    test.assert(cfgvalue.infer_scalar("1e999") == cfgvalue.str_value("1e999"))
+
+    test.case("things that only look like numbers stay text")
+    test.assert(cfgvalue.infer_scalar("-") == cfgvalue.str_value("-"))
+    test.assert(cfgvalue.infer_scalar("e5") == cfgvalue.str_value("e5"))
+    test.assert(cfgvalue.infer_scalar("1e") == cfgvalue.str_value("1e"))
+    test.assert(cfgvalue.infer_scalar("1.2.3") == cfgvalue.str_value("1.2.3"))
+    test.assert(cfgvalue.infer_scalar("1e5e5") == cfgvalue.str_value("1e5e5"))
+    test.assert(cfgvalue.infer_scalar("1-5") == cfgvalue.str_value("1-5"))
+
+    test.case("scalar_text writes each scalar so it reads back the same")
+    test.assert(cfgvalue.scalar_text(cfgvalue.str_value("x")) == Some("x"))
+    test.assert(cfgvalue.scalar_text(cfgvalue.null_value()) == Some("null"))
+    test.assert(cfgvalue.scalar_text(cfgvalue.int_value(0 - 7)) == Some("-7"))
+    test.assert(cfgvalue.scalar_text(cfgvalue.float_value(30.0)) == Some("30.0"))
+    test.assert(cfgvalue.scalar_text(cfgvalue.float_value(1.5)) == Some("1.5"))
+    test.assert(cfgvalue.infer_scalar(cfgvalue.scalar_text(cfgvalue.float_value(30.0)) ?? "") == cfgvalue.float_value(30.0))
+
+    test.case("field on something that is not a table finds nothing")
+    test.assert(cfgvalue.field(cfgvalue.int_value(1), "a") == None)
+
+@test
+fn test_the_layer_edges() [io]
+    test.case("named finds nothing when no layer has the name")
+    test.assert(cfglayer.named([cfglayer.layer("a", 0, cfgvalue.empty_table())], "b") == None)
+
+    test.case("top_rank of negative ranks is the highest of them")
+    test.assert(cfglayer.top_rank([cfglayer.layer("a", 0 - 5, cfgvalue.empty_table()),
+                                   cfglayer.layer("b", 0 - 2, cfgvalue.empty_table())]) == 0 - 2)
+
+    test.case("origin_of a path nothing set is None")
+    test.assert(cfgmerge.origin_of(sample(), "nothing") == None)
+
+    test.case("an earlier layer with a shorter list is not in the history of a later element")
+    let short = cfglayer.layer("short", 0, cfgvalue.table([
+        cfgvalue.pair("xs", cfgvalue.list_of([cfgvalue.int_value(1)]))]))
+    let long = cfglayer.layer("long", 1, cfgvalue.table([
+        cfgvalue.pair("xs", cfgvalue.list_of([cfgvalue.int_value(1), cfgvalue.int_value(2)]))]))
+    let m = cfgmerge.merge_all([short, long])
+    test.assert(cfgmerge.origin_of(m, "xs.1") == Some(KeyOrigin { path: "xs.1", layer: "long", rank: 1 }))
+    test.assert(list.len(cfgmerge.history_of([short, long], "xs.1")) == 1)
+
+@test
+fn test_the_environment_mapping_at_its_edges() [io]
+    let keep_case = EnvKeyRule { prefix: "APP_",
+        separator: "__",
+        lowercase: false,
+        list_separator: None,
+        infer_scalars: false }
+
+    test.case("a rule that keeps case maps a name as written")
+    test.assert(cfgenvkeys.map_name(keep_case, "APP_Server__Port") == Some("Server.Port"))
+    test.assert(cfgenvkeys.name_for(keep_case, "Server.Port") == Some("APP_Server__Port"))
+
+    test.case("a lowercasing rule has no name for an upper-case segment")
+    test.assert(cfgenvkeys.name_for(cfgenvkeys.rule("APP_"), "Server") == None)
+
+    test.case("a segment that holds the separator, or ends with part of it, has no name")
+    test.assert(cfgenvkeys.name_for(cfgenvkeys.rule("APP_"), "a__b") == None)
+    test.assert(cfgenvkeys.name_for(cfgenvkeys.rule("APP_"), "a_.b") == None)
+
+    test.case("a path that does not parse has no name")
+    test.assert(cfgenvkeys.name_for(cfgenvkeys.rule("APP_"), "a..b") == None)
+
+    test.case("each reason a name is skipped")
+    let skipped = cfgenvkeys.skipped_names(cfgenvkeys.rule("APP_"), [
+        ("PATH", "/bin"), ("APP_", "1"), ("APP_A____B", "2"), ("APP_OK", "3")])
+    test.assert(skipped == [("PATH", "no prefix"), ("APP_", "nothing after the prefix"), ("APP_A____B", "empty segment")])
+
+    test.case("a rule that does not infer keeps every value a string")
+    let l = cfgenvkeys.layer_from(keep_case, [("APP_PORT", "8080")], "env", 1)
+    test.assert(cfglookup.get_str(cfgmerge.merge_all([l]), "PORT") == Ok("8080"))
+
+    test.case("with a list separator, an empty value is the empty list")
+    let split = EnvKeyRule { prefix: "APP_",
+        separator: "__",
+        lowercase: true,
+        list_separator: Some(","),
+        infer_scalars: true }
+    let e = cfgenvkeys.layer_from(split, [("APP_HOSTS", "")], "env", 1)
+    test.assert(cfglookup.get_list(cfgmerge.merge_all([e]), "hosts") == Ok([]))

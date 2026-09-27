@@ -1,14 +1,9 @@
-// envkeys_tests.nv — the API suite for the environment key mapping,
-// in both directions, with no environment anywhere in it.
+// envkeys_tests.nv — the suite for the environment key mapping, in
+// both directions, with no environment anywhere in it.
 //
-// RED ON PURPOSE: every body is a `todo()`.  Run with `--isolate` for
-// one verdict per `@test`.
-//
-// THE POINT OF THESE CASES is that they run with nothing exported.
-// The mapping is a pure function over pairs the host supplies, so a
-// test can assert what `APP_SERVER__PORT=8080` produces without any
-// process ever having that variable — which is the reason the mapping
-// is in the `core` half at all.
+// The mapping is a function over pairs the host supplies, so a test
+// can assert what `APP_SERVER__PORT=8080` produces without any process
+// having that variable.
 
 use std.test
 use std.list

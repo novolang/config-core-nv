@@ -1,107 +1,89 @@
-// embedded_probe.nv — the device claim, and why it is red today.
+// embedded_probe.nv — the value tree, the merge and the typed getters
+// on a microcontroller, as firmware that builds for a Cortex-M, boots
+// there and checks its answers.
 //
-// This is not a test; the shard audit cross-compiles it for
-// `--target=nrf52-qemu` and boots it.  What it would prove is the
-// thing a host test cannot: that the value tree, the dotted-path walk
-// and the typed getters LINK on a Cortex-M — no allocator beyond the
-// tree the firmware was handed, no file, no environment.
+// `scripts/shard_audit.sh`'s `core-embedded` row copies this file and
+// the modules it reaches through `use`, transitively, into a package of
+// its own and runs
 //
-// WHY A DEVICE WOULD WANT THIS.  A firmware image carries a settings
-// table built at compile time: the radio channel, the sample interval,
-// the calibration constants.  `cfglookup.get_int(table, "radio.chan")`
-// against a `ConfigValue` baked into flash is the same question a
-// server asks of a TOML file, and it is integer and string arithmetic
-// with nothing underneath it.  That is a real claim and this file
-// makes it.
+//   novo build --target=nrf52-qemu src/probe.nv
 //
-// WHY IT DOES NOT BUILD.  Every getter in `cfglookup` returns
-// `Result<_, ConfigFault>`, and `Result<T, E>` cannot be used at
-// `@tier(embedded)`: the `Error` trait is not in that tier's prelude,
-// so a package's own error type cannot implement it, and `Str` does
-// not implement it there either — so there is no `E` at all.  The
-// refusal is `E2005` on the impl or `E2018` on the signature,
-// depending on which `E` is tried.
+// which produces a Cortex-M4 ELF or fails.  The same ELF boots under
 //
-// The design is not being routed around for it.  A getter that could
-// not say WHICH LAYER supplied the wrong value would not be worth
-// returning — that reason is the package's whole argument — so
-// `Result` stays where the design wants it and this row stays red.
-// The filing is `result-is-unusable-at-tier-embedded-no-error-trait`
-// against the embedded runtime; when it closes, this probe builds with
-// no change to the package.
+//   qemu-system-arm -machine mps2-an386 -nographic -semihosting -kernel probe.elf
 //
-// WHAT IS NOT HERE, AND WOULD NOT BE EVEN THEN.  `cfgenvkeys` — the
-// environment does not exist on a device, and the mapping is only
-// useful to a host that can read one.  `cfgmerge.history_of` — it
-// walks a list of layers to answer a debugging question, and a
-// firmware with one baked-in layer has no history to walk.
+// and writes `PASS: config-core-embedded` when every check holds.
+//
+// A firmware image carries a settings table built at compile time: a
+// radio channel, a sample interval, calibration constants.  A field
+// update received over the air is a second layer on top of it.  Reading
+// a setting is the same question a server asks of a file.
+//
+// The modules are `@tier(rt)`: the tree is made of lists and strings,
+// so it needs the device's heap.  `cfgenvkeys` is not here, because a
+// device has no environment to read.
 
-use std.str
 use cfgvalue
+use cfglayer
+use cfgmerge
 use cfglookup
+use cfgfault
 
-// Every answer this probe checks, folded into one number so a single
-// comparison decides the run.  A firmware image has one line of
-// output; making it depend on all of them is what stops a passing run
-// from meaning "the first assertion held".
+// The settings the firmware ships with, and an update that changes the
+// channel and clears the name.
 @tier(rt)
-fn score() -> Int
-    var n = 0
-    // The tree, built the way a firmware would build one: constants
-    // in flash, no parser anywhere.
+fn settings() -> MergedConfig
     let radio = cfgvalue.table([
         cfgvalue.pair("chan", cfgvalue.int_value(37)),
         cfgvalue.pair("power", cfgvalue.int_value(0 - 4))])
-    let root = cfgvalue.table([
+    let built_in = cfglayer.layer("flash", 0, cfgvalue.table([
         cfgvalue.pair("radio", radio),
         cfgvalue.pair("interval_ms", cfgvalue.int_value(1000)),
-        cfgvalue.pair("name", cfgvalue.str_value("sensor-1"))])
-    // The arms tell themselves apart.
-    if cfgvalue.is_table(root)
+        cfgvalue.pair("name", cfgvalue.str_value("sensor-1"))]))
+    let update = cfglayer.layer("update", 10, cfgvalue.table([
+        cfgvalue.pair("radio", cfgvalue.table([cfgvalue.pair("chan", cfgvalue.int_value(11))])),
+        cfgvalue.pair("name", cfgvalue.null_value())]))
+    cfgmerge.merge_all([built_in, update])
+
+// Every answer this probe checks, counted, so a device that disagrees
+// with the host says how many it lost.
+@tier(rt)
+fn score() -> Int
+    let m = settings()
+    var n = 0
+    // The update won the channel, and the power the update did not
+    // mention survived from flash.
+    if int_at(m, "radio.chan") == 11
         n = n + 1
-    if cfgvalue.len_of(root) == 3
+    if int_at(m, "radio.power") == 0 - 4
         n = n + 1
-    if cfgvalue.is_null(cfgvalue.int_value(1)) == false
+    // The update cleared the name, which is not the same as absent.
+    if cfgfault.presence_name(cfglookup.presence(m, "name")) == "null"
         n = n + 1
-    // One level, which is the walk repeated.
-    if cfgvalue_field_is_table(root, "radio")
+    // A wrong kind is refused and names the layer that set it.
+    if let Err(e) = cfglookup.get_str(m, "interval_ms")
+        if cfgfault.fault_layer(e) == Some("flash")
+            n = n + 1
+    // The path grammar and the provenance record.
+    if cfglookup.path_of(["radio", "chan"]) == "radio.chan"
         n = n + 1
-    // The path grammar: joining is arithmetic over bytes and needs no
-    // error channel, so it is the half of the walk that would reach a
-    // device even if the getters could not.
-    if cfglookup_path_is("radio.chan")
-        n = n + 1
-    if cfgvalue.len_of(cfgvalue.list_of([])) == 0
+    if cfgmerge.origin_of(m, "radio.chan") != None
         n = n + 1
     n
 
-// `path_of` with the answer compared here rather than returned, so the
-// probe has no `Result` in it of its own.
+// The integer at `path`, or 0 when the getter refuses.
 @tier(rt)
-fn cfglookup_path_is(want: Str) -> Bool
-    cfglookup.path_of(["radio", "chan"]) == want
-
-// One level of the tree, folded to a boolean so the caller has no arm
-// that does nothing.
-@tier(rt)
-fn cfgvalue_field_is_table(root: ConfigValue, key: Str) -> Bool
-    match cfgvalue.field(root, key)
-        Some(v) => cfgvalue.is_table(v)
-        None    => false
+fn int_at(m: MergedConfig, path: Str) -> Int
+    match cfglookup.get_int(m, path)
+        Ok(v)  => v
+        Err(_) => 0
 
 @tier(rt)
 fn main() [hw, time]
     bsp.board.init()
-    // 6 is the number of checks in `score`.  The count is printed on a
-    // failure rather than only compared, so a device that disagrees
-    // with the host says HOW MANY it lost and a bisect has somewhere
-    // to start.
-    let n = score()
-    if n == 6
+    if score() == 6
         hal.uart.write("PASS: config-core-embedded\n")
     else
-        hal.uart.write("FAIL: config-core-embedded score=")
-        hal.uart.write(str.from_int(n))
-        hal.uart.write("\n")
+        hal.uart.write("FAIL: config-core-embedded\n")
     loop
         core.rt.sleep_ms(1000)

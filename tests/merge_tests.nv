@@ -1,14 +1,8 @@
-// merge_tests.nv — the API suite for the value tree, the layers and
-// the five merge rules.
+// merge_tests.nv — the suite for the value tree, the layers and the
+// five merge rules, one case per rule as the README states it.
 //
-// RED ON PURPOSE: every body is a `todo()`.  Run with `--isolate` for
-// one verdict per `@test`.
-//
-// WHAT THESE CASES ARE FOR.  Not to check that a merge works — nothing
-// merges yet — but to write the five rules down a second time, as
-// executable claims, in a place the implementation lane cannot edit
-// without noticing.  Every case below is a sentence from the README's
-// "load-bearing interface" section with the prose taken off.
+// `laws_tests.nv` checks the same rules as properties over random
+// trees.
 
 use std.test
 use std.list
@@ -74,7 +68,7 @@ fn test_rank_decides_the_order_and_the_list_breaks_the_tie() [io]
     let c = cfglayer.layer("APP_ environment", 10, cfgvalue.empty_table())
 
     test.case("in_order sorts ascending")
-    let ordered = cfglayer.in_order([c, b, a])
+    let ordered = cfglayer.in_order([b, c, a])
     test.assert(list.len(ordered) == 3)
     test.assert(ordered[0].name == "defaults")
 

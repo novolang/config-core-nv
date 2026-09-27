@@ -1,14 +1,9 @@
-// lookup_tests.nv — the API suite for the path grammar, the typed
-// getters and the three-answer presence question.
+// lookup_tests.nv — the suite for the path grammar, the typed getters
+// and the three-answer presence question.
 //
-// RED ON PURPOSE: every body is a `todo()`.  Run with `--isolate` for
-// one verdict per `@test`.
-//
-// WHAT A GETTER CASE CAN ASSERT while the bodies are stubs is the
-// SHAPE of the refusal, not the value: that a wrong type is
-// `CfgWrongType` and not `CfgMissing`, that a bad path never reaches
-// the tree, that an explicit null is its own answer.  Those are the
-// decisions; the arithmetic under them is the implementation lane's.
+// Each case asserts the shape of a refusal as well as the value: that
+// a wrong type is `CfgWrongType` and not `CfgMissing`, that a bad path
+// never reaches the tree, and that an explicit null is its own answer.
 
 use std.test
 use std.list
