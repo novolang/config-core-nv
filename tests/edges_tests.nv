@@ -190,6 +190,8 @@ fn test_infer_scalar_at_its_edges() [io]
     test.assert(cfgvalue.infer_scalar("-99999999999999999999") == cfgvalue.str_value("-99999999999999999999"))
     test.assert(cfgvalue.infer_scalar("9223372036854775807") == cfgvalue.int_value(math.max_int()))
     test.assert(cfgvalue.infer_scalar("9223372036854775808") == cfgvalue.str_value("9223372036854775808"))
+    test.assert(cfgvalue.infer_scalar("-9223372036854775808") == cfgvalue.int_value(math.min_int()))
+    test.assert(cfgvalue.infer_scalar("-9223372036854775809") == cfgvalue.str_value("-9223372036854775809"))
     test.assert(cfgvalue.infer_scalar("-12") == cfgvalue.int_value(0 - 12))
     test.assert(cfgvalue.infer_scalar("1e999") == cfgvalue.str_value("1e999"))
 
