@@ -1,33 +1,33 @@
 // cfgenvkeys.nv — environment-variable names as a pure function over
 // paths, in both directions.
 //
-// THE HOST HANDS IN PAIRS.  Nothing here reads the environment; a
-// `core` package cannot, and `[io]` is what an environment read costs
-// (SPEC § 5.1).  `config-nv` looks the names up and hands this module
-// a list of `(name, value)`, which is also what makes the mapping
-// testable without exporting anything.
+// Nothing here reads the environment.  The host looks the names up
+// and hands this module a list of `(name, value)` pairs, which also
+// makes the mapping testable with nothing exported.
 //
-// BOTH DIRECTIONS ARE HERE, and the second one is the load-bearing
-// one for a reason that only shows up on a real host: **the standard
-// library cannot enumerate the environment.**  `env.get(name)` reads
-// one name and there is no `env.vars()`, so `config-nv` cannot scan
-// for everything starting `APP_`.  What it can do is ask for the
-// names a program's own settings map to — which is `name_for` applied
-// to each path the program declares — and look those up one at a
-// time.  So the direction most libraries never need is the direction
-// this one is built around, and `map_name` is the inverse it checks
-// itself against.
+// Both directions are here, and the second is the one a host uses: the
+// standard library reads one environment variable by name and cannot
+// list them all.  A host therefore turns each path its program
+// understands into a name with `name_for` and looks that name up.
+// `map_name` is the inverse.
 //
-// THE MAPPING, by default:
+// The default mapping:
 //
 //   APP_SERVER__PORT  ->  server.port      prefix "APP_", separator "__"
 //   APP_DEBUG         ->  debug
 //   OTHER_THING       ->  (not ours; skipped)
 //
-// A separator that is not `.` is the point: `__` survives a shell that
-// will not export a name with a dot in it, and it lets a single
-// underscore stay part of a key (`APP_LOG__MAX_SIZE` is
-// `log.max_size`, not `log.max.size`).
+// The separator is not `.`, because a shell will not export a name with
+// a dot in it, and it is two underscores, so a single underscore stays
+// part of a key: `APP_LOG__MAX_SIZE` is `log.max_size`.
+//
+// These functions are for a host with an environment, and are not part
+// of the build for a microcontroller.
+
+use std.str
+use cfgvalue
+use cfglayer
+use cfglookup
 
 // How environment names and dotted paths correspond.
 //
@@ -39,28 +39,24 @@
 //     println(r.separator)
 // ```
 pub struct EnvKeyRule
-    // The prefix a name must carry to be ours.  `""` claims every
-    // variable in the environment, which is occasionally what a
-    // container wants and is never the default.
+    // The prefix a name must carry to be mapped.  `""` claims every
+    // name, which a container occasionally wants.
     prefix: Str
     // What stands for a dot in a name.  `"__"` by default.
     separator: Str
     // Whether the path segments are lowercased.  True by default:
-    // environment names are conventionally upper case and
-    // configuration keys conventionally are not, and a mapping that
-    // did not lowercase would make `APP_PORT` and a file's `port`
-    // two different settings.
+    // environment names are conventionally upper case and configuration
+    // keys are not, and without it `APP_PORT` and a file's `port` would
+    // be two different settings.
     lowercase: Bool
-    // When set, a value is split on this string into a list — so
-    // `APP_HOSTS=a,b` becomes a list of two strings rather than one
-    // string with a comma in it.  `None` by default, because a value
-    // that happens to contain a comma is far more common than a list.
+    // When set, a value is split on this string into a list, so
+    // `APP_HOSTS=a,b` becomes a list of two strings.  An empty value is
+    // the empty list.  `None` by default, because a value that happens
+    // to contain a comma is commoner than a list.
     list_separator: ?Str
-    // Whether a value's text is typed by `cfgvalue.infer_scalar`.
-    // True by default: `APP_PORT=8080` should reach `get_int`, and
-    // the alternative is a getter that coerces, which loses the layer
-    // in every refusal.  Set false to keep every environment value a
-    // string.
+    // Whether a value's text, or each item of a split value, is typed
+    // by `cfgvalue.infer_scalar`.  True by default, so `APP_PORT=8080`
+    // reaches `get_int`.  Set false to keep every value a string.
     infer_scalars: Bool
 
 // The default rule for a prefix: `"__"` as the separator, lowercased
@@ -73,14 +69,19 @@ pub struct EnvKeyRule
 //     println("${cfgenvkeys.rule("APP_").lowercase}")
 // ```
 pub fn rule(prefix: Str) -> EnvKeyRule
-    todo("config-core-nv.cfgenvkeys.rule")
+    EnvKeyRule { prefix: prefix,
+        separator: "__",
+        lowercase: true,
+        list_separator: None,
+        infer_scalars: true }
 
 // The dotted path an environment name maps to, or `None` when the
-// name does not carry the prefix.
+// name does not carry the prefix, has nothing after it, or has an empty
+// segment between two separators.
 //
-// The escape `cfglookup` uses is applied here too: a segment that
-// contains a literal dot after lowercasing is escaped, so the result
-// is always a path `cfglookup.split` accepts.
+// A segment that contains a dot or a backslash is escaped as
+// `cfglookup.path_of` escapes it, so the answer is always a path
+// `cfglookup.split` accepts.
 //
 // ```novo
 // use cfgenvkeys
@@ -91,19 +92,27 @@ pub fn rule(prefix: Str) -> EnvKeyRule
 //         None    => println("not ours")
 // ```
 pub fn map_name(r: EnvKeyRule, name: Str) -> ?Str
-    todo("config-core-nv.cfgenvkeys.map_name")
+    if skip_reason(r, name) != ""
+        return None
+    var segs: [Str] = []
+    for part in str.split(str.slice(name, str.len(r.prefix), str.len(name)), r.separator)
+        if r.lowercase
+            list.push(segs, str.lower(part))
+        else
+            list.push(segs, part)
+    Some(cfglookup.path_of(segs))
 
 // The environment name a dotted path maps to.
 //
-// **The one a host actually needs**, because the standard library
-// reads the environment by name and cannot list it.  A program
-// declares the paths it understands, this turns each into a name, and
-// `config-nv` looks those up.
+// A host looks each answer up, because the standard library reads the
+// environment by name and cannot list it.
 //
-// The inverse of `map_name` on every path it produces.  A path whose
-// segments contain characters an environment name cannot carry gives
-// `None` rather than mangling — a shell will not export `a-b`, and a
-// name that silently became `A_B` would collide with the path `a.b`.
+// The inverse of `map_name`.  A segment may hold ASCII letters, digits
+// and underscores.  A path gives `None` rather than a mangled name when
+// a segment holds anything else, since a shell will not export `a-b`,
+// or when `map_name` would not give the same path back: an upper-case
+// letter under a lowercasing rule, or a segment that contains the
+// separator or begins or ends with part of it.
 //
 // ```novo
 // use cfgenvkeys
@@ -114,13 +123,26 @@ pub fn map_name(r: EnvKeyRule, name: Str) -> ?Str
 //         None    => println("no name for that path")
 // ```
 pub fn name_for(r: EnvKeyRule, path: Str) -> ?Str
-    todo("config-core-nv.cfgenvkeys.name_for")
+    match cfglookup.split(path)
+        Ok(segs) =>
+            var parts: [Str] = []
+            for seg in segs
+                if not exportable(seg)
+                    return None
+                if r.lowercase
+                    list.push(parts, str.upper(seg))
+                else
+                    list.push(parts, seg)
+            let name = r.prefix + str.join(parts, r.separator)
+            if map_name(r, name) == Some(path)
+                return Some(name)
+            None
+        Err(_)   => None
 
 // Every name a list of paths maps to, skipping the ones that have
 // none.
 //
-// `name_for` over a list, which is the call shape a host wants: it
-// has the program's settings and wants the names to look up.
+// `name_for` over a list, which is the call shape a host wants.
 //
 // ```novo
 // use cfgenvkeys
@@ -131,16 +153,19 @@ pub fn name_for(r: EnvKeyRule, path: Str) -> ?Str
 //     println("${list.len(ns)}")
 // ```
 pub fn names_for(r: EnvKeyRule, paths: [Str]) -> [Str]
-    todo("config-core-nv.cfgenvkeys.names_for")
+    var out: [Str] = []
+    for p in paths
+        if let Some(n) = name_for(r, p)
+            list.push(out, n)
+    out
 
-// **A layer from a list of `(name, value)` pairs.**
+// A layer from a list of `(name, value)` pairs.
 //
-// Pairs whose name does not carry the prefix are skipped.  Each
-// surviving pair becomes one path in the layer's tree, typed by
-// `infer_scalars` and split by `list_separator` under the rule.  A
-// name that maps to a path already set by an EARLIER pair in the list
-// replaces it, so the list's own order is the tie-break — which
-// matches what a shell does when a variable is exported twice.
+// A pair whose name `map_name` does not map is skipped.  Each other
+// pair sets one path in the layer's tree, split by `list_separator` and
+// typed by `infer_scalars` under the rule.  A later pair that maps to
+// a path an earlier one set replaces it, which is what a shell does
+// when a variable is exported twice.
 //
 // ```novo
 // use cfgenvkeys
@@ -153,14 +178,17 @@ pub fn names_for(r: EnvKeyRule, paths: [Str]) -> [Str]
 //     println("${cfgvalue.len_of(l.root)}")
 // ```
 pub fn layer_from(r: EnvKeyRule, pairs: [(Str, Str)], name: Str, rank: Int) -> ConfigLayer
-    todo("config-core-nv.cfgenvkeys.layer_from")
+    var root = cfgvalue.empty_table()
+    for pr in pairs
+        if let Some(p) = map_name(r, pr.0)
+            root = with_value(root, p, value_for(r, pr.1))
+    cfglayer.layer(name, rank, root)
 
-// The pairs `layer_from` would skip, with the reason.
+// The names `layer_from` would skip, each paired with the reason.
 //
-// A program that exports `APP_SERVER_PORT` where the rule wants
-// `APP_SERVER__PORT` gets nothing and no error, which is the single
-// most common way a configuration layer is silently empty.  This is
-// how a `--explain-config` says which names were seen and ignored.
+// The reason is one of `"no prefix"`, `"nothing after the prefix"` and
+// `"empty segment"`.  A `--explain-config` prints these, because a
+// name that maps to nothing produces no error.
 //
 // ```novo
 // use cfgenvkeys
@@ -171,20 +199,24 @@ pub fn layer_from(r: EnvKeyRule, pairs: [(Str, Str)], name: Str, rank: Int) -> C
 //     println("${list.len(cfgenvkeys.skipped_names(r, [("PATH", "/bin")]))}")
 // ```
 pub fn skipped_names(r: EnvKeyRule, pairs: [(Str, Str)]) -> [(Str, Str)]
-    todo("config-core-nv.cfgenvkeys.skipped_names")
+    var out: [(Str, Str)] = []
+    for pr in pairs
+        let why = skip_reason(r, pr.0)
+        if why != ""
+            list.push(out, (pr.0, why))
+    out
 
 // A layer from a list of `(path, value)` pairs, with no name mapping
 // at all.
 //
-// The command line's shape: `--set server.port=8080` is already a
-// path, and putting it through the environment rule would lowercase
-// and re-separate something the caller spelled correctly.  Values are
-// typed by `cfgvalue.infer_scalar` — the same rule, because both
-// sources are text.
+// This is the command line's shape: `--set server.port=8080` is
+// already a path, used as written.  Values are typed by
+// `cfgvalue.infer_scalar`, the rule the environment uses, because both
+// sources are text.  A later pair replaces an earlier one at the same
+// path.
 //
-// A path that does not parse is skipped and reported by
-// `bad_paths`; refusing the whole layer for one bad flag would lose
-// the four good ones.
+// A path that does not parse is skipped and reported by `bad_paths`, so
+// one bad flag does not lose the good ones.
 //
 // ```novo
 // use cfgenvkeys
@@ -195,7 +227,10 @@ pub fn skipped_names(r: EnvKeyRule, pairs: [(Str, Str)]) -> [(Str, Str)]
 //     println("${cfgvalue.len_of(l.root)}")
 // ```
 pub fn layer_from_paths(pairs: [(Str, Str)], name: Str, rank: Int) -> ConfigLayer
-    todo("config-core-nv.cfgenvkeys.layer_from_paths")
+    var root = cfgvalue.empty_table()
+    for pr in pairs
+        root = with_value(root, pr.0, cfgvalue.infer_scalar(pr.1))
+    cfglayer.layer(name, rank, root)
 
 // The paths `layer_from_paths` could not parse, with the fault for
 // each.
@@ -208,4 +243,56 @@ pub fn layer_from_paths(pairs: [(Str, Str)], name: Str, rank: Int) -> ConfigLaye
 //     println("${list.len(cfgenvkeys.bad_paths([("a..b", "1")]))}")
 // ```
 pub fn bad_paths(pairs: [(Str, Str)]) -> [ConfigFault]
-    todo("config-core-nv.cfgenvkeys.bad_paths")
+    var out: [ConfigFault] = []
+    for pr in pairs
+        if let Err(e) = cfglookup.split(pr.0)
+            list.push(out, e)
+    out
+
+// Why `map_name` would not map `name`, or `""` when it would.
+fn skip_reason(r: EnvKeyRule, name: Str) -> Str
+    if not str.starts_with(name, r.prefix)
+        return "no prefix"
+    let rest = str.slice(name, str.len(r.prefix), str.len(name))
+    if rest == ""
+        return "nothing after the prefix"
+    for part in str.split(rest, r.separator)
+        if part == ""
+            return "empty segment"
+    ""
+
+// Whether a path segment can be part of an environment name: one or
+// more ASCII letters, digits and underscores.
+fn exportable(seg: Str) -> Bool
+    for i in 0..str.len(seg)
+        let b = str.byte_at_or(seg, i, 0)
+        let letter = b >= 'a' and b <= 'z' or b >= 'A' and b <= 'Z'
+        if not (letter or b >= '0' and b <= '9' or b == '_')
+            return false
+    str.len(seg) > 0
+
+// An environment value's text as a value under the rule: split into a
+// list when the rule has a list separator, and typed when it infers
+// scalars.
+fn value_for(r: EnvKeyRule, text: Str) -> ConfigValue
+    match r.list_separator
+        Some(sep) =>
+            var items: [ConfigValue] = []
+            if text != ""
+                for part in str.split(text, sep)
+                    list.push(items, scalar_for(r, part))
+            cfgvalue.list_of(items)
+        None      => scalar_for(r, text)
+
+// One piece of text, typed when the rule infers scalars.
+fn scalar_for(r: EnvKeyRule, text: Str) -> ConfigValue
+    if r.infer_scalars
+        return cfgvalue.infer_scalar(text)
+    cfgvalue.str_value(text)
+
+// `root` with `path` set to `v`, or `root` unchanged when the path
+// does not parse.
+fn with_value(root: ConfigValue, path: Str, v: ConfigValue) -> ConfigValue
+    match cfglookup.with_path(root, path, v)
+        Ok(t)  => t
+        Err(_) => root
