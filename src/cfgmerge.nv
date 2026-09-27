@@ -1,46 +1,46 @@
 // cfgmerge.nv — the merge algebra, and the record of who won.
 //
-// THE FIVE RULES, in the order they are applied, and every one of
-// them is a decision some other configuration library makes
-// differently:
+// The five rules, in the order they apply:
 //
-//   1. Layers apply in ascending rank; ties keep list order.  A LATER
-//      LAYER WINS.
-//   2. Two TABLES merge deep, key by key.  A key only the lower layer
+//   1. Layers apply in ascending rank, and equal ranks keep list
+//      order.  A later layer wins.
+//   2. Two tables merge deep, key by key.  A key only the lower layer
 //      has survives.
-//   3. Two LISTS do not merge: the later one REPLACES the earlier one
-//      whole.  There is no append, no union and no index-wise merge.
-//   4. Anything else REPLACES.  A scalar over a table, a table over a
-//      scalar, a scalar over a scalar — the later value stands alone.
-//   5. `CfgNull` is a VALUE and follows rule 4.  It replaces what is
-//      under it and it does not delete the key: the merged tree holds
+//   3. Two lists do not merge: the later one replaces the earlier one
+//      whole.  There is no append, no union and no merge by index.
+//   4. Anything else replaces.  A scalar over a table, a table over a
+//      scalar and a scalar over a scalar all leave the later value
+//      standing alone.
+//   5. `CfgNull` is a value and follows rule 4.  It replaces what is
+//      under it and does not delete the key: the merged tree holds
 //      null at that path, and `cfglookup.presence` reports
 //      `KeyWasNull`.
 //
-// WHY LISTS REPLACE.  Every alternative needs an identity for an
-// element, and a configuration list has none: two `["-O2"]` flags are
-// not the same flag, and merging `["a"]` under `["b"]` into
-// `["a", "b"]` means no layer can ever REMOVE an inherited entry.
-// Replacement is the rule figment, Rust's `config` and Viper all
-// settle on, and it is the one a person can predict without reading
-// the source.  A program that wants accumulation puts each
-// contribution at its own key and concatenates them itself.
+// Lists replace because a configuration list has no identity for an
+// element.  Two `"-O2"` flags are not the same flag, and appending
+// would leave no layer able to remove an inherited entry.  figment,
+// Rust's `config` and Go's Viper settle on the same rule.  A program
+// that wants to accumulate puts each contribution at its own key and
+// concatenates them itself.
 //
-// WHY NULL DOES NOT DELETE.  Deleting would make the merged tree
-// depend on the ORDER of two layers that both mention a key in a way
-// no lookup could explain afterwards: `origin_of` would have to point
-// at a layer whose value is not there.  A layer that wants a setting
-// gone sets it to null, and the caller's `KeyWasNull` is the signal —
-// which is a decision the program makes with a reason, not one this
-// package makes silently.
+// Null does not delete, so that `origin_of` always points at a layer
+// whose value is there.  A layer that wants a setting gone sets it to
+// null, and the program reading `KeyWasNull` decides what that means.
 //
-// PROVENANCE IS PER LEAF, NOT PER LAYER.  `MergedConfig` carries one
-// origin per path that holds a value, so "which layer set
-// `server.port`" is a lookup and not a re-merge.  The layers a path
-// passed through on the way — the ones that lost — are not stored,
-// because storing every write of every key is a debugging log and not
-// a configuration; `history_of` re-walks the layers for one path when
-// somebody actually asks.
+// The provenance record holds one origin per path in the merged tree,
+// naming the winner.  The layers a path passed through on the way are
+// not stored; `history_of` walks the layers again for one path when
+// somebody asks.
+//
+// Paths here are written the way `cfglookup.path_of` writes them, with
+// `.` and `\` in a key escaped by a backslash.  `cfglookup` depends
+// on this module, so the join is written here as well.
+//
+// Every function here is `@tier(rt)`.
+
+use std.str
+use cfgvalue
+use cfglayer
 
 // A merged tree and the record of which layer set each path.
 //
@@ -56,9 +56,10 @@ pub struct MergedConfig
     // empty table, and a layer whose root is not a table is refused
     // before it contributes.
     root: ConfigValue
-    // One entry per path in `root` that holds a value, naming the
-    // layer that won it.  Tables get an entry too, naming the highest
-    // layer that contributed any key beneath.
+    // One entry per path in `root`, in the order the paths appear in
+    // the tree, naming the last layer to set anything at that path.
+    // For a table that is the highest layer that set it or any key
+    // beneath it; the elements of a list share the list's layer.
     origins: [KeyOrigin]
 
 // One path and the layer that set it.
@@ -83,9 +84,8 @@ pub struct KeyOrigin
 //
 // The layers are applied in `cfglayer.in_order`'s order.  A layer
 // whose root is not a table contributes nothing and is reported by
-// `refused_layers` rather than raising — one bad adapter should not
-// cost a program its other four sources, and the caller decides
-// whether that is fatal.
+// `refused_layers`, so one bad adapter does not cost a program its
+// other sources.  The caller decides whether that is fatal.
 //
 // ```novo
 // use cfgmerge
@@ -97,8 +97,20 @@ pub struct KeyOrigin
 //     let m = cfgmerge.merge_all([base])
 //     println("${cfgvalue.is_table(cfgmerge.root_of(m))}")
 // ```
-pub fn merge_all(ls: [ConfigLayer]) -> MergedConfig
-    todo("config-core-nv.cfgmerge.merge_all")
+pub @tier(rt)
+fn merge_all(ls: [ConfigLayer]) -> MergedConfig
+    let ordered = taken(cfglayer.in_order(ls))
+    var root = cfgvalue.empty_table()
+    for l in ordered
+        root = merge_values(root, l.root)
+    var paths: [Str] = []
+    var segs: [[Str]] = []
+    collect(root, "", [], paths, segs)
+    var origins: [KeyOrigin] = []
+    for k in 0..list.len(paths)
+        if let Some(l) = last_setter(ordered, segs[k])
+            list.push(origins, KeyOrigin { path: paths[k], layer: l.name, rank: l.rank })
+    MergedConfig { root: root, origins: origins }
 
 // The merged tree.
 //
@@ -109,10 +121,12 @@ pub fn merge_all(ls: [ConfigLayer]) -> MergedConfig
 // fn main() [io]
 //     println("${cfgvalue.len_of(cfgmerge.root_of(cfgmerge.empty()))}")
 // ```
-pub fn root_of(m: MergedConfig) -> ConfigValue
-    todo("config-core-nv.cfgmerge.root_of")
+pub @tier(rt)
+fn root_of(m: MergedConfig) -> ConfigValue
+    m.root
 
-// Every origin, in the order the paths appear in the tree.
+// Every origin, in the order the paths appear in the tree, as a new
+// list.
 //
 // ```novo
 // use cfgmerge
@@ -121,15 +135,16 @@ pub fn root_of(m: MergedConfig) -> ConfigValue
 // fn main() [io]
 //     println("${list.len(cfgmerge.origins_of(cfgmerge.empty()))}")
 // ```
-pub fn origins_of(m: MergedConfig) -> [KeyOrigin]
-    todo("config-core-nv.cfgmerge.origins_of")
+pub @tier(rt)
+fn origins_of(m: MergedConfig) -> [KeyOrigin]
+    m.origins[:]
 
-// **The provenance answer**: which layer set this path.
+// The provenance answer: which layer set this path.
 //
-// `None` when no layer set it — the same condition `cfglookup.get_*`
-// reports as `CfgMissing`, and the reason this returns `?KeyOrigin`
-// rather than a `Result` is that "nobody set it" is an ordinary
-// answer to this question and not a refusal.
+// `None` when no layer set it, which is the condition the getters in
+// `cfglookup` report as `CfgMissing`.  "Nobody set it" is an ordinary
+// answer to this question, so it is an optional rather than a
+// refusal.  A path that does not parse matches nothing.
 //
 // ```novo
 // use cfgmerge
@@ -139,16 +154,19 @@ pub fn origins_of(m: MergedConfig) -> [KeyOrigin]
 //         Some(o) => println(o.layer)
 //         None    => println("nothing set it")
 // ```
-pub fn origin_of(m: MergedConfig, path: Str) -> ?KeyOrigin
-    todo("config-core-nv.cfgmerge.origin_of")
+pub @tier(rt)
+fn origin_of(m: MergedConfig, path: Str) -> ?KeyOrigin
+    for o in m.origins
+        if o.path == path
+            return Some(o)
+    None
 
-// Every layer that set this path, lowest rank first — the winner
-// last.
+// Every layer that set this path, in the order the merge applies
+// them, so the winner is last.
 //
-// A re-walk of the layers rather than a lookup in the merge, because
-// the merge stores only the winner.  This is the "why is it 8080 and
-// not 80" call, and it is separate so that the common path costs
-// nothing to keep.
+// This walks the layers again rather than reading the merge, which
+// keeps only the winner.  It is the question behind "why is it 8080
+// and not 80".  A layer whose root is not a table set nothing.
 //
 // ```novo
 // use cfgmerge
@@ -157,14 +175,24 @@ pub fn origin_of(m: MergedConfig, path: Str) -> ?KeyOrigin
 // fn main() [io]
 //     println("${list.len(cfgmerge.history_of([], "server.port"))}")
 // ```
-pub fn history_of(ls: [ConfigLayer], path: Str) -> [KeyOrigin]
-    todo("config-core-nv.cfgmerge.history_of")
+pub @tier(rt)
+fn history_of(ls: [ConfigLayer], path: Str) -> [KeyOrigin]
+    var out: [KeyOrigin] = []
+    for l in taken(cfglayer.in_order(ls))
+        var paths: [Str] = []
+        var segs: [[Str]] = []
+        collect(l.root, "", [], paths, segs)
+        for p in paths
+            if p == path
+                list.push(out, KeyOrigin { path: path, layer: l.name, rank: l.rank })
+    out
 
-// The layers `merge_all` would not take, with the kind each one's
-// root turned out to be.
+// The layers `merge_all` would not take, because their root is not a
+// table, each as an origin with an empty path, in the order given.
 //
-// Empty for a well-formed set, which is the common case, so a caller
-// can check this once instead of guarding every layer.
+// Empty for a well-formed set, so a caller can check this once instead
+// of guarding every layer.  `cfgvalue.kind_of` on the layer's root
+// says what it was instead.
 //
 // ```novo
 // use cfgmerge
@@ -173,14 +201,20 @@ pub fn history_of(ls: [ConfigLayer], path: Str) -> [KeyOrigin]
 // fn main() [io]
 //     println("${list.len(cfgmerge.refused_layers([]))}")
 // ```
-pub fn refused_layers(ls: [ConfigLayer]) -> [KeyOrigin]
-    todo("config-core-nv.cfgmerge.refused_layers")
+pub @tier(rt)
+fn refused_layers(ls: [ConfigLayer]) -> [KeyOrigin]
+    var out: [KeyOrigin] = []
+    for l in ls
+        if not cfgvalue.is_table(l.root)
+            list.push(out, KeyOrigin { path: "", layer: l.name, rank: l.rank })
+    out
 
 // The merge of two values under the five rules, with no provenance.
 //
 // The algebra by itself, for a caller that has two trees and no
-// layers — a program merging a defaults table it wrote in code under
-// a file it read.  `merge_all` is this folded over a sorted list.
+// layers.  `merge_all` is this folded over the layers in order.  The
+// keys of a merged table are the lower table's in its order, then the
+// keys only the upper table has, in its order.
 //
 // ```novo
 // use cfgmerge
@@ -191,8 +225,14 @@ pub fn refused_layers(ls: [ConfigLayer]) -> [KeyOrigin]
 //     let over  = cfgvalue.table([cfgvalue.pair("b", cfgvalue.int_value(2))])
 //     println("${cfgvalue.len_of(cfgmerge.merge_values(under, over))}")
 // ```
-pub fn merge_values(under: ConfigValue, over: ConfigValue) -> ConfigValue
-    todo("config-core-nv.cfgmerge.merge_values")
+pub @tier(rt)
+fn merge_values(under: ConfigValue, over: ConfigValue) -> ConfigValue
+    match under
+        CfgTable(lower) =>
+            match over
+                CfgTable(upper) => CfgTable(merge_pairs(lower, upper))
+                _               => over
+        _               => over
 
 // The merge of nothing: an empty table and no origins.
 //
@@ -203,5 +243,104 @@ pub fn merge_values(under: ConfigValue, over: ConfigValue) -> ConfigValue
 // fn main() [io]
 //     println("${list.len(cfgmerge.origins_of(cfgmerge.empty()))}")
 // ```
-pub fn empty() -> MergedConfig
-    todo("config-core-nv.cfgmerge.empty")
+pub @tier(rt)
+fn empty() -> MergedConfig
+    let none: [KeyOrigin] = []
+    MergedConfig { root: cfgvalue.empty_table(), origins: none }
+
+// The layers whose root is a table, in the order given.
+@tier(rt)
+fn taken(ls: [ConfigLayer]) -> [ConfigLayer]
+    var out: [ConfigLayer] = []
+    for l in ls
+        if cfgvalue.is_table(l.root)
+            list.push(out, l)
+    out
+
+// The pairs of the lower table with the upper table's merged in: a key
+// both hold merges under the five rules, and a key only the upper one
+// holds is added at the end.
+@tier(rt)
+fn merge_pairs(lower: [ConfigPair], upper: [ConfigPair]) -> [ConfigPair]
+    var out = lower[:]
+    for up in upper
+        var at = 0 - 1
+        for k in 0..list.len(out)
+            if at < 0 and out[k].key == up.key
+                at = k
+        if at >= 0
+            out[at] = cfgvalue.pair(up.key, merge_values(out[at].value, up.value))
+        else
+            list.push(out, up)
+    out
+
+// Every path under `v`, in the order they appear, written into
+// `paths`, with the segments of each written into `segs` at the same
+// index.  A table's keys and a list's indices are both segments.
+@tier(rt)
+fn collect(v: ConfigValue, prefix: Str, above: [Str], var paths: [Str], var segs: [[Str]])
+    match v
+        CfgTable(pairs) =>
+            for p in pairs
+                visit(p.value, prefix, above, p.key, paths, segs)
+        CfgList(items)  =>
+            for i in 0..list.len(items)
+                visit(items[i], prefix, above, str.from_int(i), paths, segs)
+        _               =>
+            return
+
+// Record the child at segment `seg` and everything under it.
+@tier(rt)
+fn visit(child: ConfigValue, prefix: Str, above: [Str], seg: Str, var paths: [Str],
+         var segs: [[Str]])
+    let full = joined(prefix, seg)
+    var here = above[:]
+    list.push(here, seg)
+    list.push(paths, full)
+    list.push(segs, here)
+    collect(child, full, here, paths, segs)
+
+// `prefix` and one more segment, with a `.` or `\` in the segment
+// escaped by a backslash.
+@tier(rt)
+fn joined(prefix: Str, seg: Str) -> Str
+    let escaped = str.replace(str.replace(seg, "\\", "\\\\"), ".", "\\.")
+    if prefix == ""
+        return escaped
+    prefix + "." + escaped
+
+// The last layer, in the order given, whose tree holds a value at
+// these segments.
+@tier(rt)
+fn last_setter(ls: [ConfigLayer], segs: [Str]) -> ?ConfigLayer
+    var found: ?ConfigLayer = None
+    for l in ls
+        if holds(l.root, segs)
+            found = Some(l)
+    found
+
+// Whether `root` holds a value at these segments.  A segment reads a
+// table's key, or indexes a list when it is the decimal spelling of an
+// index in range.
+@tier(rt)
+fn holds(root: ConfigValue, segs: [Str]) -> Bool
+    var cur = root
+    for seg in segs
+        match step(cur, seg)
+            Some(next) =>
+                cur = next
+            None       =>
+                return false
+    true
+
+// One step down from `v` by segment `seg`, or `None`.
+@tier(rt)
+fn step(v: ConfigValue, seg: Str) -> ?ConfigValue
+    match v
+        CfgTable(_)    => cfgvalue.field(v, seg)
+        CfgList(items) =>
+            for i in 0..list.len(items)
+                if str.from_int(i) == seg
+                    return Some(items[i])
+            None
+        _              => None

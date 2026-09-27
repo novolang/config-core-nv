@@ -1,33 +1,40 @@
 // cfglookup.nv — dotted paths, and the typed getters that refuse with
 // a reason.
 //
-// THE PATH GRAMMAR, in three lines:
+// The path grammar:
 //
 //   a path is one or more segments joined by `.`
-//   a segment that is only digits indexes a LIST
+//   a segment that is only digits indexes a list
 //   `\.` inside a segment is a literal dot, `\\` a literal backslash
 //
-// So `server.hosts.0` is the first host, `log."my.app".level` is not
-// the spelling — there are no quotes — and `log.my\.app.level` is.
-// One escape and no quoting keeps the grammar something a person can
-// hold in their head, and it round-trips: `path_of(split(p)) == p`.
+// So `server.hosts.0` is the first host, and `log.my\.app.level` is the
+// key `my.app` inside `log`.  There are no quotes.  The grammar
+// round-trips: `path_of(split(p))` is `p` for every path `split`
+// accepts.
 //
-// A NUMERIC SEGMENT AGAINST A TABLE reads the table's key `"0"`, not
-// an index, because a TOML table may honestly have a key called `0`
-// and refusing it would make some documents unreachable.  The segment
-// is an index only when the value at that level is a list.
+// A numeric segment against a table reads the table's key `"0"`,
+// because a TOML table may have a key spelled that way.  The segment is
+// an index only where the value at that level is a list, and only in
+// its plain decimal spelling: `hosts.007` is missing.
 //
-// THE GETTERS DO NOT COERCE.  `get_int` on `CfgStr("8080")` is
+// The getters do not coerce.  `get_int` on `CfgStr("8080")` is
 // `CfgWrongType`, naming the layer that supplied the string.  The one
 // coercion in the package is `cfgvalue.infer_scalar`, applied where a
-// layer is BUILT from text, so that a program can see in a provenance
-// answer that the environment layer holds an int — rather than
-// discovering at every call site that a getter was lenient.
+// layer is built from text, so a provenance answer shows that the
+// environment layer holds an int.
+//
+// Every function here is `@tier(rt)`.
+
+use std.str
+use cfgvalue
+use cfgfault
+use cfgmerge
 
 // Split a path into its segments, applying the escapes.
 //
 // `CfgBadPath` for an empty path, an empty segment (`a..b`, a leading
-// or trailing dot) or a backslash at the end of the path.
+// or trailing dot), a backslash at the end of the path, or a backslash
+// before anything but a dot or a backslash.
 //
 // ```novo
 // use cfglookup
@@ -38,14 +45,46 @@
 //         Ok(segs) => println("${list.len(segs)}")
 //         Err(_)   => println("bad path")
 // ```
-pub fn split(path: Str) -> Result<[Str], ConfigFault>
-    todo("config-core-nv.cfglookup.split")
+pub @tier(rt)
+fn split(path: Str) -> Result<[Str], ConfigFault>
+    let n = str.len(path)
+    if n == 0
+        return Err(CfgBadPath(path, "empty path"))
+    var segs: [Str] = []
+    var cur = ""
+    var start = 0
+    var skip = false
+    for i in 0..n
+        if skip
+            skip = false
+            continue
+        let b = str.byte_at_or(path, i, 0)
+        if b == '\\'
+            if i + 1 >= n
+                return Err(CfgBadPath(path, "dangling escape"))
+            let next = str.byte_at_or(path, i + 1, 0)
+            if next != '.' and next != '\\'
+                return Err(CfgBadPath(path, "unknown escape"))
+            cur = cur + str.slice(path, start, i) + str.slice(path, i + 1, i + 2)
+            start = i + 2
+            skip = true
+        else if b == '.'
+            let seg = cur + str.slice(path, start, i)
+            if seg == ""
+                return Err(CfgBadPath(path, "empty segment"))
+            list.push(segs, seg)
+            cur = ""
+            start = i + 1
+    let last = cur + str.slice(path, start, n)
+    if last == ""
+        return Err(CfgBadPath(path, "empty segment"))
+    list.push(segs, last)
+    Ok(segs)
 
 // Join segments into a path, escaping the dots and backslashes in
 // them.
 //
-// The inverse of `split` on every input `split` accepts, which is why
-// the escape exists at all.
+// The inverse of `split` on every input `split` accepts.
 //
 // ```novo
 // use cfglookup
@@ -53,14 +92,21 @@ pub fn split(path: Str) -> Result<[Str], ConfigFault>
 // fn main() [io]
 //     println(cfglookup.path_of(["log", "my.app", "level"]))
 // ```
-pub fn path_of(segments: [Str]) -> Str
-    todo("config-core-nv.cfglookup.path_of")
+pub @tier(rt)
+fn path_of(segments: [Str]) -> Str
+    var out = ""
+    for i in 0..list.len(segments)
+        if i > 0
+            out = out + "."
+        out = out + str.replace(str.replace(segments[i], "\\", "\\\\"), ".", "\\.")
+    out
 
 // The value at a path, or the reason there is none.
 //
-// The one walk every typed getter is written on top of.  Its refusals
-// are the three shapes of "not there": `CfgBadPath` before the tree is
-// touched, `CfgNotATable` part way down, `CfgMissing` at the leaf.
+// The walk every typed getter is written on.  Its refusals are the
+// three shapes of "not there": `CfgBadPath` before the tree is
+// touched, `CfgNotATable` part way down, and `CfgMissing` at the end.
+// An index past the end of a list is `CfgMissing`.
 //
 // ```novo
 // use cfglookup
@@ -71,14 +117,16 @@ pub fn path_of(segments: [Str]) -> Str
 //         Ok(_)  => println("found")
 //         Err(e) => println(cfgfault.fault_kind(e))
 // ```
-pub fn get_value(m: MergedConfig, path: Str) -> Result<ConfigValue, ConfigFault>
-    todo("config-core-nv.cfglookup.get_value")
+pub @tier(rt)
+fn get_value(m: MergedConfig, path: Str) -> Result<ConfigValue, ConfigFault>
+    walk(m.root, path, m)
 
 // Whether a path is set, and by whom.
 //
-// The question to ask before a default: `KeyAbsent` means nothing
-// mentioned it and a default is right; `KeyWasNull` means a layer
-// cleared it on purpose and a default would undo that.
+// The question to ask before a default.  `KeyAbsent` means nothing
+// mentioned it, and a default is right.  `KeyWasNull` means a layer
+// cleared it on purpose, and a default would undo that.  A path that
+// does not parse, or that walks through a scalar, is `KeyAbsent`.
 //
 // ```novo
 // use cfglookup
@@ -88,12 +136,17 @@ pub fn get_value(m: MergedConfig, path: Str) -> Result<ConfigValue, ConfigFault>
 // fn main() [io]
 //     println(cfgfault.presence_name(cfglookup.presence(cfgmerge.empty(), "a.b")))
 // ```
-pub fn presence(m: MergedConfig, path: Str) -> KeyPresence
-    todo("config-core-nv.cfglookup.presence")
+pub @tier(rt)
+fn presence(m: MergedConfig, path: Str) -> KeyPresence
+    match get_value(m, path)
+        Ok(CfgNull) => KeyWasNull(layer_at(m, path))
+        Ok(v)       => KeyHeld(cfgvalue.kind_of(v), layer_at(m, path))
+        Err(_)      => KeyAbsent
 
 // A string at a path.
 //
-// `CfgWrongType` for any other kind, naming the layer that set it.
+// `CfgWrongType` for any other kind and `CfgWasNull` for null, each
+// naming the layer that set it.
 //
 // ```novo
 // use cfglookup
@@ -104,14 +157,17 @@ pub fn presence(m: MergedConfig, path: Str) -> KeyPresence
 //         Ok(s)  => println(s)
 //         Err(_) => println("no host")
 // ```
-pub fn get_str(m: MergedConfig, path: Str) -> Result<Str, ConfigFault>
-    todo("config-core-nv.cfglookup.get_str")
+pub @tier(rt)
+fn get_str(m: MergedConfig, path: Str) -> Result<Str, ConfigFault>
+    match typed(m, path, KindStr)!
+        CfgStr(s) => Ok(s)
+        other     => Err(wrong(m, path, KindStr, other))
 
 // An integer at a path.
 //
-// A `CfgFloat` is NOT accepted, even one whose fraction is zero: the
-// layer wrote `8080.0` and a program that wanted a port should hear
-// about it.
+// A `CfgFloat` is refused, even one whose fraction is zero: a layer
+// that wrote `8080.0` where a port was wanted is a mistake worth
+// hearing about.
 //
 // ```novo
 // use cfglookup
@@ -122,14 +178,17 @@ pub fn get_str(m: MergedConfig, path: Str) -> Result<Str, ConfigFault>
 //         Ok(n)  => println("${n}")
 //         Err(_) => println("no port")
 // ```
-pub fn get_int(m: MergedConfig, path: Str) -> Result<Int, ConfigFault>
-    todo("config-core-nv.cfglookup.get_int")
+pub @tier(rt)
+fn get_int(m: MergedConfig, path: Str) -> Result<Int, ConfigFault>
+    match typed(m, path, KindInt)!
+        CfgInt(n) => Ok(n)
+        other     => Err(wrong(m, path, KindInt, other))
 
 // A float at a path.
 //
-// A `CfgInt` IS accepted and widened — this is the one asymmetry, and
-// it is the one every language already has: `timeout = 30` in a file
-// whose author meant seconds should not refuse a float getter.
+// A `CfgInt` is accepted and widened.  This is the one asymmetry:
+// `timeout = 30` in a file whose author meant seconds should not refuse
+// a float getter.
 //
 // ```novo
 // use cfglookup
@@ -140,14 +199,17 @@ pub fn get_int(m: MergedConfig, path: Str) -> Result<Int, ConfigFault>
 //         Ok(f)  => println("${f}")
 //         Err(_) => println("no timeout")
 // ```
-pub fn get_float(m: MergedConfig, path: Str) -> Result<Float, ConfigFault>
-    todo("config-core-nv.cfglookup.get_float")
+pub @tier(rt)
+fn get_float(m: MergedConfig, path: Str) -> Result<Float, ConfigFault>
+    match typed(m, path, KindFloat)!
+        CfgFloat(f) => Ok(f)
+        CfgInt(n)   => Ok(n as Float)
+        other       => Err(wrong(m, path, KindFloat, other))
 
 // A boolean at a path.
 //
-// `CfgStr("true")` is refused; `cfgvalue.infer_scalar` is what turns
-// the environment's text into a `CfgBool`, and it runs when the layer
-// is built.
+// `CfgStr("true")` is refused.  `cfgvalue.infer_scalar` turns the
+// environment's text into a `CfgBool`, when the layer is built.
 //
 // ```novo
 // use cfglookup
@@ -158,8 +220,11 @@ pub fn get_float(m: MergedConfig, path: Str) -> Result<Float, ConfigFault>
 //         Ok(b)  => println("${b}")
 //         Err(_) => println("not set")
 // ```
-pub fn get_bool(m: MergedConfig, path: Str) -> Result<Bool, ConfigFault>
-    todo("config-core-nv.cfglookup.get_bool")
+pub @tier(rt)
+fn get_bool(m: MergedConfig, path: Str) -> Result<Bool, ConfigFault>
+    match typed(m, path, KindBool)!
+        CfgBool(b) => Ok(b)
+        other      => Err(wrong(m, path, KindBool, other))
 
 // A list at a path, as values.
 //
@@ -173,14 +238,17 @@ pub fn get_bool(m: MergedConfig, path: Str) -> Result<Bool, ConfigFault>
 //         Ok(xs) => println("${list.len(xs)}")
 //         Err(_) => println("no hosts")
 // ```
-pub fn get_list(m: MergedConfig, path: Str) -> Result<[ConfigValue], ConfigFault>
-    todo("config-core-nv.cfglookup.get_list")
+pub @tier(rt)
+fn get_list(m: MergedConfig, path: Str) -> Result<[ConfigValue], ConfigFault>
+    match typed(m, path, KindList)!
+        CfgList(items) => Ok(items[:])
+        other          => Err(wrong(m, path, KindList, other))
 
 // A list of strings at a path.
 //
 // Refuses the whole list if any element is not a string, naming the
-// path of the ELEMENT — `server.hosts.2` — because a list that is
-// mostly strings is the common shape of a hand-edited mistake.
+// path of the element, such as `server.hosts.2`: a list that is mostly
+// strings is the common shape of a hand-edited mistake.
 //
 // ```novo
 // use cfglookup
@@ -192,13 +260,21 @@ pub fn get_list(m: MergedConfig, path: Str) -> Result<[ConfigValue], ConfigFault
 //         Ok(xs) => println("${list.len(xs)}")
 //         Err(e) => println(cfgfault.fault_path(e))
 // ```
-pub fn get_str_list(m: MergedConfig, path: Str) -> Result<[Str], ConfigFault>
-    todo("config-core-nv.cfglookup.get_str_list")
+pub @tier(rt)
+fn get_str_list(m: MergedConfig, path: Str) -> Result<[Str], ConfigFault>
+    let items = get_list(m, path)!
+    var out: [Str] = []
+    for i in 0..list.len(items)
+        match items[i]
+            CfgStr(s) => list.push(out, s)
+            other     =>
+                return Err(CfgWrongType("${path}.${i}", KindStr, cfgvalue.kind_of(other), layer_at(m, path)))
+    Ok(out)
 
 // A table at a path, as its pairs.
 //
-// For a program that reads a whole section — a map of log levels by
-// module name — without knowing the keys in advance.
+// For a program that reads a whole section, such as a map of log
+// levels by module name, without knowing the keys in advance.
 //
 // ```novo
 // use cfglookup
@@ -210,15 +286,18 @@ pub fn get_str_list(m: MergedConfig, path: Str) -> Result<[Str], ConfigFault>
 //         Ok(ps) => println("${list.len(ps)}")
 //         Err(_) => println("no levels")
 // ```
-pub fn get_table(m: MergedConfig, path: Str) -> Result<[ConfigPair], ConfigFault>
-    todo("config-core-nv.cfglookup.get_table")
+pub @tier(rt)
+fn get_table(m: MergedConfig, path: Str) -> Result<[ConfigPair], ConfigFault>
+    match typed(m, path, KindTable)!
+        CfgTable(pairs) => Ok(pairs[:])
+        other           => Err(wrong(m, path, KindTable, other))
 
-// Every path in the merged tree that holds a scalar, in tree order.
+// Every path in the merged tree that holds a scalar or null, in tree
+// order.
 //
-// What a `--dump-config` writes, and what a test compares.  Tables and
-// lists are not listed as paths of their own; a list's ELEMENTS are,
-// with their numeric segments, so every line names something a getter
-// can fetch.
+// This is what a `--dump-config` prints.  Tables and lists are not
+// listed as paths of their own; a list's elements are, with their
+// numeric segments, so every line names something a getter can fetch.
 //
 // ```novo
 // use cfglookup
@@ -228,15 +307,16 @@ pub fn get_table(m: MergedConfig, path: Str) -> Result<[ConfigPair], ConfigFault
 // fn main() [io]
 //     println("${list.len(cfglookup.leaf_paths(cfgmerge.empty()))}")
 // ```
-pub fn leaf_paths(m: MergedConfig) -> [Str]
-    todo("config-core-nv.cfglookup.leaf_paths")
+pub @tier(rt)
+fn leaf_paths(m: MergedConfig) -> [Str]
+    var out: [Str] = []
+    leaves(cfgmerge.root_of(m), "", out)
+    out
 
 // The same walk against a bare tree, for a caller with no layers.
 //
-// The refusals it can raise are the same minus the layer: a fault
-// from here names `""` where a merged lookup would name the layer,
-// because there is no layer to name.  A program that wants the layer
-// merges first.
+// The refusals are the same, with an empty layer name where a merged
+// lookup would name the layer, because there is no layer to name.
 //
 // ```novo
 // use cfglookup
@@ -247,16 +327,19 @@ pub fn leaf_paths(m: MergedConfig) -> [Str]
 //         Ok(_)  => println("found")
 //         Err(_) => println("absent")
 // ```
-pub fn value_at(root: ConfigValue, path: Str) -> Result<ConfigValue, ConfigFault>
-    todo("config-core-nv.cfglookup.value_at")
+pub @tier(rt)
+fn value_at(root: ConfigValue, path: Str) -> Result<ConfigValue, ConfigFault>
+    walk(root, path, cfgmerge.empty())
 
 // A tree with one path set, creating the tables on the way down.
 //
-// The building block a host uses to turn a flat list of
-// `(path, value)` pairs — which is what the environment and the
-// command line both are — into a layer's tree.  An existing scalar in
-// the way is replaced, following merge rule 4, so the result is
-// always the tree the last write asked for.
+// A host turns a flat list of `(path, value)` pairs, which is what the
+// environment and the command line both are, into a layer's tree with
+// this.  A scalar in the way is replaced by a table, following merge
+// rule 4, so the result is always the tree the last write asked for.
+// A numeric segment against a list replaces that element when it is in
+// range; otherwise the list is replaced by a table too.  A `root` that
+// is not a table becomes one.
 //
 // ```novo
 // use cfglookup
@@ -267,5 +350,120 @@ pub fn value_at(root: ConfigValue, path: Str) -> Result<ConfigValue, ConfigFault
 //         Ok(t)  => println("${cfgvalue.len_of(t)}")
 //         Err(_) => println("bad path")
 // ```
-pub fn with_path(root: ConfigValue, path: Str, v: ConfigValue) -> Result<ConfigValue, ConfigFault>
-    todo("config-core-nv.cfglookup.with_path")
+pub @tier(rt)
+fn with_path(root: ConfigValue, path: Str, v: ConfigValue) -> Result<ConfigValue, ConfigFault>
+    let segs = split(path)!
+    Ok(set_in(root, segs, 0, v))
+
+// The walk under `get_value` and `value_at`.  `m` supplies the layer a
+// refusal names; a bare tree walks with `cfgmerge.empty()`, whose
+// record names no layer.
+@tier(rt)
+fn walk(root: ConfigValue, path: Str, m: MergedConfig) -> Result<ConfigValue, ConfigFault>
+    let segs = split(path)!
+    var cur = root
+    var at = ""
+    for seg in segs
+        match cur
+            CfgTable(_)    =>
+                match cfgvalue.field(cur, seg)
+                    Some(next) =>
+                        cur = next
+                    None       =>
+                        return Err(CfgMissing(path))
+            CfgList(items) =>
+                if not is_index(seg)
+                    return Err(CfgNotATable(path, at, KindList, layer_at(m, at)))
+                let i = index_in(items, seg)
+                if i < 0
+                    return Err(CfgMissing(path))
+                cur = items[i]
+            _              =>
+                return Err(CfgNotATable(path, at, cfgvalue.kind_of(cur), layer_at(m, at)))
+        at = extended(at, seg)
+    Ok(cur)
+
+// The value at `path`, refused as `CfgWasNull` when it is null.  The
+// caller checks the kind.
+@tier(rt)
+fn typed(m: MergedConfig, path: Str, wanted: ConfigKind) -> Result<ConfigValue, ConfigFault>
+    let v = get_value(m, path)!
+    if cfgvalue.is_null(v)
+        return Err(CfgWasNull(path, layer_at(m, path)))
+    Ok(v)
+
+// The refusal for a value of the wrong kind at `path`.
+@tier(rt)
+fn wrong(m: MergedConfig, path: Str, wanted: ConfigKind, found: ConfigValue) -> ConfigFault
+    CfgWrongType(path, wanted, cfgvalue.kind_of(found), layer_at(m, path))
+
+// The name of the layer that set `path`, or `""` when the record has
+// none.
+@tier(rt)
+fn layer_at(m: MergedConfig, path: Str) -> Str
+    match cfgmerge.origin_of(m, path)
+        Some(o) => o.layer
+        None    => ""
+
+// `prefix` with one more segment, escaped as `path_of` escapes it.
+@tier(rt)
+fn extended(prefix: Str, seg: Str) -> Str
+    if prefix == ""
+        return path_of([seg])
+    prefix + "." + path_of([seg])
+
+// Whether a segment is only decimal digits, which is what makes it an
+// index against a list.
+@tier(rt)
+fn is_index(seg: Str) -> Bool
+    for i in 0..str.len(seg)
+        let b = str.byte_at_or(seg, i, 0)
+        if b < '0' or b > '9'
+            return false
+    str.len(seg) > 0
+
+// The index of `items` that `seg` spells in decimal, or -1.  `007` and
+// an index past the end spell none, so they read as missing.
+@tier(rt)
+fn index_in(items: [ConfigValue], seg: Str) -> Int
+    for k in 0..list.len(items)
+        if str.from_int(k) == seg
+            return k
+    0 - 1
+
+// Every path under `v` that holds a scalar or null, written into `out`.
+@tier(rt)
+fn leaves(v: ConfigValue, prefix: Str, var out: [Str])
+    match v
+        CfgTable(pairs) =>
+            for p in pairs
+                leaves(p.value, extended(prefix, p.key), out)
+        CfgList(items)  =>
+            for i in 0..list.len(items)
+                leaves(items[i], extended(prefix, str.from_int(i)), out)
+        _               => list.push(out, prefix)
+
+// `node` with the value at `segs[i..]` set to `v`, creating or
+// replacing the tables on the way down.
+@tier(rt)
+fn set_in(node: ConfigValue, segs: [Str], i: Int, v: ConfigValue) -> ConfigValue
+    if i == list.len(segs)
+        return v
+    let seg = segs[i]
+    match node
+        CfgTable(pairs) =>
+            var out = pairs[:]
+            for k in 0..list.len(out)
+                if out[k].key == seg
+                    out[k] = cfgvalue.pair(seg, set_in(out[k].value, segs, i + 1, v))
+                    return CfgTable(out)
+            list.push(out, cfgvalue.pair(seg, set_in(cfgvalue.empty_table(), segs, i + 1, v)))
+            CfgTable(out)
+        CfgList(items)  =>
+            let k = index_in(items, seg)
+            if k >= 0
+                var out = items[:]
+                out[k] = set_in(items[k], segs, i + 1, v)
+                return CfgList(out)
+            set_in(cfgvalue.empty_table(), segs, i, v)
+        _               => set_in(cfgvalue.empty_table(), segs, i, v)
