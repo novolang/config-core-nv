@@ -339,8 +339,8 @@ fn step(v: ConfigValue, seg: Str) -> ?ConfigValue
     match v
         CfgTable(_)    => cfgvalue.field(v, seg)
         CfgList(items) =>
-            for i in 0..list.len(items)
-                if str.from_int(i) == seg
+            if let Some(i) = str.to_int(seg)
+                if i >= 0 and i < list.len(items) and str.from_int(i) == seg
                     return Some(items[i])
             None
         _              => None

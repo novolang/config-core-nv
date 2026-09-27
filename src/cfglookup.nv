@@ -65,7 +65,7 @@ fn split(path: Str) -> Result<[Str], ConfigFault>
             let next = str.byte_at_or(path, i + 1, 0)
             if next != '.' and next != '\\'
                 return Err(CfgBadPath(path, "unknown escape"))
-            cur = cur + str.slice(path, start, i) + str.slice(path, i + 1, i + 2)
+            cur = cur + str.slice(path, start, i) + str.from_byte(next)
             start = i + 2
             skip = true
         else if b == '.'
@@ -426,8 +426,8 @@ fn is_index(seg: Str) -> Bool
 // an index past the end spell none, so they read as missing.
 @tier(rt)
 fn index_in(items: [ConfigValue], seg: Str) -> Int
-    for k in 0..list.len(items)
-        if str.from_int(k) == seg
+    if let Some(k) = str.to_int(seg)
+        if k >= 0 and k < list.len(items) and str.from_int(k) == seg
             return k
     0 - 1
 
